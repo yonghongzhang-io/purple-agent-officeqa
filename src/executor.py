@@ -150,6 +150,7 @@ def _append_history(context_id: str, role: str, content: str) -> None:
 # LLM response with agentic tool loop
 # ---------------------------------------------------------------------------
 def get_llm_response(prompt: str, context_id: str = "") -> str:
+    logger.info(f"ENV CHECK — LLM_PROVIDER={os.environ.get('LLM_PROVIDER')} GROQ_KEY={'SET' if os.environ.get('GROQ_API_KEY') else 'MISSING'}")
     """
     Call the LLM with full conversation history and an optional tool-use loop.
     Supports: anthropic, openai, groq, nebius, deepinfra.
