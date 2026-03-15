@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 
 import uvicorn
 from dotenv import load_dotenv
@@ -19,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="Purple Agent — AgentX Sprint 1")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=9009)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 9009)))
     parser.add_argument("--card-url", default=None)
     args = parser.parse_args()
 
