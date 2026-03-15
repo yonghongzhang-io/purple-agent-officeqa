@@ -62,6 +62,8 @@ RULES:
 3. If asked to produce structured data, ensure it is valid and properly formatted.
 4. If asked to transform text, preserve all content not explicitly changed.
 5. Be precise with numbers, names, capitalization, and punctuation.
+6. NEVER hedge or give multiple possible answers. Give ONE definitive answer.
+7. Keep your FINAL_ANSWER under 500 characters.
 
 RESPONSE FORMAT:
 <REASONING>
@@ -71,7 +73,10 @@ RESPONSE FORMAT:
 [Your complete answer — the exact output requested, nothing else]
 </FINAL_ANSWER>
 
-CRITICAL: The <FINAL_ANSWER> tag MUST contain ONLY the requested output. No explanations, no caveats, no "Here is..." preamble inside FINAL_ANSWER."""
+CRITICAL:
+- The <FINAL_ANSWER> tag MUST contain ONLY the requested output. No explanations, no caveats, no "Here is..." preamble.
+- NEVER say "either X or Y" or "could be X or Y" — pick ONE answer.
+- Keep FINAL_ANSWER under 500 characters."""
 
 SYSTEM_PROMPT_CRM = """You are an expert AI agent competing in the AgentX-AgentBeats Sprint 1 competition.
 Your current task is a CRMArena task involving CRM data operations.
@@ -93,7 +98,10 @@ RESPONSE FORMAT:
 [Your precise answer. For structured data, output valid JSON. For numbers, give exact values.]
 </FINAL_ANSWER>
 
-CRITICAL: The <FINAL_ANSWER> tag MUST contain ONLY the requested output."""
+CRITICAL:
+- The <FINAL_ANSWER> tag MUST contain ONLY the requested output.
+- NEVER hedge or give multiple possible answers. Give ONE definitive answer.
+- Keep FINAL_ANSWER under 500 characters."""
 
 SYSTEM_PROMPT_FINANCIAL = """You are an expert AI agent competing in the AgentX-AgentBeats Sprint 1 competition.
 Your current task involves financial document analysis and quantitative reasoning.
@@ -106,16 +114,29 @@ RULES:
 5. For time series: handle date ranges correctly, include all data points.
 6. When units are involved, state them clearly in your answer.
 7. If a percentage is asked, give the percentage. If a dollar amount, give dollars.
+8. NEVER hedge or give multiple possible answers. Give ONE definitive answer.
+9. Keep your FINAL_ANSWER under 500 characters.
+10. Use commas in large numbers only if the source does. The scoring is exact.
+
+SCORING INFO (how your answer is judged):
+- Numerical answers: exact match by default (0% tolerance). "2602" must match "2602".
+- Commas are stripped: "2,602" = "2602".
+- Units like "billion", "million" are detected from context words.
+- Text answers: case-insensitive substring match against ground truth.
+- If you give multiple candidate answers, you AUTOMATICALLY FAIL (hedge detection).
 
 RESPONSE FORMAT:
 <REASONING>
 [Detailed step-by-step calculations. Show ALL intermediate values.]
 </REASONING>
 <FINAL_ANSWER>
-[The precise numerical or textual answer. Include units if applicable.]
+[The precise value. Include units if the question implies them. ONE answer only.]
 </FINAL_ANSWER>
 
-CRITICAL: The <FINAL_ANSWER> tag MUST contain ONLY the value requested."""
+CRITICAL:
+- The <FINAL_ANSWER> tag MUST contain ONLY the value requested.
+- NEVER say "either X or Y" or "approximately" — give the EXACT value.
+- Keep FINAL_ANSWER under 500 characters."""
 
 SYSTEM_PROMPT_GENERAL = """You are an expert AI agent competing in the AgentX-AgentBeats Sprint 1 competition.
 You handle diverse tasks with precision and accuracy.
@@ -360,14 +381,29 @@ def _append_history(context_id: str, role: str, content: str) -> None:
 # Output cleaning — extract only the FINAL_ANSWER content
 # ---------------------------------------------------------------------------
 def _clean_response(response: str) -> str:
-    """Return the full response with reasoning and final answer tags intact.
+    """Ensure the response has well-formed FINAL_ANSWER tags and meets scoring requirements.
 
-    The judge expects <FINAL_ANSWER> tags in the response, so we keep them.
-    We just ensure the response is well-formed.
+    Scoring rules:
+    - FINAL_ANSWER tags are required (case-insensitive)
+    - Answer must be non-empty and under 500 characters
+    - Must not contain "no answer found"
     """
     # If no FINAL_ANSWER tag, wrap the entire response
-    if "<FINAL_ANSWER>" not in response:
-        return f"<REASONING>\n{response}\n</REASONING>\n<FINAL_ANSWER>\n{response}\n</FINAL_ANSWER>"
+    if "<FINAL_ANSWER>" not in response and "<final_answer>" not in response.lower():
+        # Try to extract the most useful part as the answer
+        lines = [l.strip() for l in response.strip().split("\n") if l.strip()]
+        answer = lines[-1] if lines else response
+        return f"<REASONING>\n{response}\n</REASONING>\n<FINAL_ANSWER>\n{answer}\n</FINAL_ANSWER>"
+
+    # Validate FINAL_ANSWER content length
+    match = re.search(r'<FINAL_ANSWER>(.*?)</FINAL_ANSWER>', response, re.DOTALL | re.IGNORECASE)
+    if match:
+        answer = match.group(1).strip()
+        if len(answer) > 500:
+            # Truncate to 500 chars, trying to break at a natural boundary
+            truncated = answer[:500].rsplit(" ", 1)[0] if " " in answer[:500] else answer[:500]
+            response = response[:match.start(1)] + "\n" + truncated + "\n" + response[match.end(1):]
+
     return response
 
 
