@@ -1,0 +1,17 @@
+# -----------------------------------------------------------------------
+# scenario.toml — AgentBeats Sprint 1 submission config
+# Replace YOUR_AGENTBEATS_ID and YOUR_GITHUB_USERNAME before submitting
+# -----------------------------------------------------------------------
+
+[purple_agent]
+agentbeats_id = "YOUR_AGENTBEATS_ID"   # From agentbeats.dev after registration
+image = "ghcr.io/YOUR_GITHUB_USERNAME/purple-agent:latest"
+role = "purple_agent"
+
+[purple_agent.environment]
+LLM_PROVIDER = "anthropic"
+ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+ANTHROPIC_MAX_TOKENS = "8000"
+ENABLE_TOOLS = "true"
+MAX_LLM_CALLS = "4"

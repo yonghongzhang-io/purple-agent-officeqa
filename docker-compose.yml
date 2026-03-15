@@ -1,0 +1,31 @@
+version: "3.9"
+
+# -----------------------------------------------------------------------
+# Local test environment for your Purple Agent
+# Run: docker compose up --build
+# -----------------------------------------------------------------------
+
+networks:
+  agentnet:
+    driver: bridge
+
+services:
+
+  purple_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: purple_agent
+    ports:
+      - "9009:9009"
+    env_file:
+      - .env
+    networks:
+      - agentnet
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9009/.well-known/agent-card.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
