@@ -942,6 +942,33 @@ def _clean_response(
 
 
 # ---------------------------------------------------------------------------
+# Global LLM call budget — all LLM calls (routing, audit, main loop) share this
+# ---------------------------------------------------------------------------
+_llm_calls_this_request: int = 0
+
+
+def _reset_llm_budget() -> None:
+    global _llm_calls_this_request
+    _llm_calls_this_request = 0
+
+
+def _consume_llm_call() -> bool:
+    """Increment the global LLM call counter. Returns True if within budget."""
+    global _llm_calls_this_request
+    max_calls = int(os.environ.get("MAX_LLM_CALLS", "4"))
+    if _llm_calls_this_request >= max_calls:
+        logger.warning(f"LLM budget exhausted ({_llm_calls_this_request}/{max_calls})")
+        return False
+    _llm_calls_this_request += 1
+    return True
+
+
+def _remaining_llm_budget() -> int:
+    max_calls = int(os.environ.get("MAX_LLM_CALLS", "4"))
+    return max(0, max_calls - _llm_calls_this_request)
+
+
+# ---------------------------------------------------------------------------
 # Lightweight LLM routing / verification helpers
 # ---------------------------------------------------------------------------
 def _provider_is_available(provider: str) -> bool:
@@ -959,6 +986,8 @@ def _provider_is_available(provider: str) -> bool:
 def _classify_with_llm(prompt: str, provider: str) -> str | None:
     """Use a cheap single-shot LLM classification only when heuristics are uncertain."""
     if not _provider_is_available(provider):
+        return None
+    if not _consume_llm_call():
         return None
 
     classifier_prompt = (
@@ -1033,6 +1062,8 @@ def _verify_with_llm(question: str, answer: str, provider: str) -> str:
     """Run a cheap numeric audit pass and return a corrected bare answer when needed."""
     if not _provider_is_available(provider):
         return answer
+    if not _consume_llm_call():
+        return answer
 
     verifier_prompt = (
         "Audit the proposed numeric answer for arithmetic, units, and missing symbols.\n"
@@ -1087,6 +1118,7 @@ def _verify_with_llm(question: str, answer: str, provider: str) -> str:
 # ---------------------------------------------------------------------------
 def get_llm_response(prompt: str, context_id: str = "") -> str:
     """Call the LLM with task-type-aware system prompt and tool loop."""
+    _reset_llm_budget()
     logger.info(f"ENV CHECK — LLM_PROVIDER={os.environ.get('LLM_PROVIDER')}")
 
     provider = os.environ.get("LLM_PROVIDER", "").lower()
@@ -1193,25 +1225,22 @@ def _call_anthropic(messages: list[dict], enable_tools: bool, context_id: str, s
     if tools_list:
         kwargs["tools"] = tools_list
 
-    max_llm_calls = int(os.environ.get("MAX_LLM_CALLS", "4"))
-    calls_made = 0
     final_text = ""
     last_error = None
 
-    while calls_made < max_llm_calls:
+    while _remaining_llm_budget() > 0:
+        if not _consume_llm_call():
+            break
         try:
             response = client.messages.create(**kwargs)
         except Exception as e:
             last_error = e
-            calls_made += 1
-            logger.warning(f"Anthropic API error (attempt {calls_made}): {e}")
-            if calls_made < max_llm_calls:
+            logger.warning(f"Anthropic API error (calls={_llm_calls_this_request}): {e}")
+            if _remaining_llm_budget() > 0:
                 import time
                 time.sleep(1)  # Brief retry delay
                 continue
             break
-
-        calls_made += 1
 
         text_parts = [b.text for b in response.content if hasattr(b, "text")]
         current_text = "\n".join(text_parts)
@@ -1269,13 +1298,12 @@ def _call_openai_compatible(provider: str, messages: list[dict], enable_tools: b
 
     base_messages = [{"role": "system", "content": system_prompt}] + messages
     current_messages = base_messages
-    max_llm_calls = int(os.environ.get("MAX_LLM_CALLS", "4"))
-    calls_made = 0
     final_text = ""
-
     last_error = None
 
-    while calls_made < max_llm_calls:
+    while _remaining_llm_budget() > 0:
+        if not _consume_llm_call():
+            break
         kwargs: dict = {
             "model": model,
             "messages": current_messages,
@@ -1290,15 +1318,12 @@ def _call_openai_compatible(provider: str, messages: list[dict], enable_tools: b
             response = client.chat.completions.create(**kwargs)
         except Exception as e:
             last_error = e
-            calls_made += 1
-            logger.warning(f"OpenAI API error (attempt {calls_made}): {e}")
-            if calls_made < max_llm_calls:
+            logger.warning(f"OpenAI API error (calls={_llm_calls_this_request}): {e}")
+            if _remaining_llm_budget() > 0:
                 import time
                 time.sleep(1)
                 continue
             break
-
-        calls_made += 1
         choice = response.choices[0]
 
         if choice.finish_reason == "tool_calls" and supports_tools:

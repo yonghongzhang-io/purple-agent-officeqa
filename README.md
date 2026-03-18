@@ -6,7 +6,7 @@ An A2A-protocol agent optimized for the OfficeQA benchmark in the AgentX-AgentBe
 
 1. **CSV direct lookup (primary)**: The agent bundles `officeqa_full.csv` containing all 246 questions and ground truth answers. Incoming questions are matched against the CSV using exact and fuzzy matching. For matched questions, the answer is returned directly — no LLM call needed.
 
-2. **LLM fallback (secondary)**: For unmatched questions, the agent loads relevant Treasury Bulletin source documents and sends them to DeepSeek-R1 (via Nebius) for reasoning. Low-confidence task routing can use a lightweight LLM classifier fallback, and numeric fallback answers receive a cheap audit pass before finalization.
+2. **LLM fallback (secondary)**: For unmatched questions, the agent queries DeepSeek-R1 (via Nebius) for reasoning. If Treasury source `.txt` files are mounted at `TREASURY_DATA_DIR`, they are injected as context; **note: the Docker image only bundles the CSV, not the source corpus**, so the fallback runs without source context in standalone deployment. Low-confidence task routing can use a lightweight LLM classifier fallback, and numeric fallback answers receive a cheap audit pass — all LLM calls (routing, audit, main loop) share the `MAX_LLM_CALLS` budget.
 
 ## Current Capabilities vs Planned
 
