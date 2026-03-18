@@ -456,6 +456,7 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
 # Treasury source corpus — keyword-based retrieval (no answer data)
 # ---------------------------------------------------------------------------
 _treasury_source_files: list[str] = []  # cached list of .txt filenames
+_treasury_preview_cache: dict[str, str] = {}
 
 
 def _resolve_treasury_data_dir() -> str:
@@ -489,6 +490,73 @@ def _list_source_files() -> list[str]:
     except Exception as e:
         logger.warning(f"Failed to list Treasury source files: {e}")
     return _treasury_source_files
+
+
+def _load_source_preview(filename: str, preview_chars: int = 16000) -> str:
+    """Load and cache a lightweight preview for lexical source ranking."""
+    cached = _treasury_preview_cache.get(filename)
+    if cached is not None:
+        return cached
+
+    fpath = os.path.join(_treasury_data_dir, filename)
+    try:
+        with open(fpath) as f:
+            preview = f.read(preview_chars)
+    except Exception as e:
+        logger.warning(f"Failed to read preview for {fpath}: {e}")
+        preview = ""
+    _treasury_preview_cache[filename] = preview.lower()
+    return _treasury_preview_cache[filename]
+
+
+def _diversify_source_files(files: list[str], max_files: int) -> list[str]:
+    """Pick roughly evenly spaced files to avoid month-prefix bias."""
+    if len(files) <= max_files:
+        return files
+
+    if max_files <= 1:
+        return [files[len(files) // 2]]
+
+    chosen_indices = {
+        round(i * (len(files) - 1) / (max_files - 1))
+        for i in range(max_files)
+    }
+    return [files[idx] for idx in sorted(chosen_indices)]
+
+
+def _score_source_file(filename: str, question: str) -> int:
+    """Score a candidate Treasury file using lexical overlap with the question."""
+    keywords = _question_keywords(question)
+    if not keywords:
+        return 0
+
+    preview = _load_source_preview(filename)
+    score = 0
+    for kw in keywords:
+        hits = preview.count(kw)
+        if hits:
+            score += min(hits, 3) * 2
+        if kw in filename.lower():
+            score += 1
+    return score
+
+
+def _select_best_source_files(candidates: list[str], question: str, max_files: int) -> list[str]:
+    """Rank candidate files lexically; fall back to diversified chronology."""
+    if len(candidates) <= max_files:
+        return candidates
+
+    ranked = [
+        (_score_source_file(fname, question), idx, fname)
+        for idx, fname in enumerate(candidates)
+    ]
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    if ranked and ranked[0][0] > 0:
+        selected = [fname for _, _, fname in ranked[:max_files]]
+        selected_set = set(selected)
+        return [fname for fname in candidates if fname in selected_set]
+
+    return _diversify_source_files(candidates, max_files)
 
 
 def _find_source_files(question: str) -> list[str]:
@@ -546,9 +614,17 @@ def _find_source_files(question: str) -> list[str]:
                 if fname in available and fname not in matched:
                     matched.append(fname)
 
-    # Limit to avoid overloading context
-    if len(matched) > 24:
-        matched = matched[:24]
+    # Limit to avoid overloading context and token budget
+    max_files = int(os.environ.get("MAX_SOURCE_FILES", "6"))
+    if matched:
+        matched = _select_best_source_files(matched, question, max_files)
+    else:
+        # No date signal at all — fall back to lexical retrieval over previews.
+        matched = _select_best_source_files(available, question, max_files)
+        if matched:
+            logger.info(
+                f"Lexical source fallback selected {len(matched)} files for undated question"
+            )
 
     if matched:
         logger.info(f"Source retrieval: {len(matched)} files for years {sorted(years_found)}")
@@ -558,7 +634,70 @@ def _find_source_files(question: str) -> list[str]:
     return matched
 
 
-def _load_source_context(question: str, max_chars: int = 120000) -> str:
+def _question_keywords(question: str) -> list[str]:
+    """Extract lightweight lexical hints for snippet retrieval."""
+    stopwords = {
+        "the", "a", "an", "and", "or", "of", "to", "in", "for", "from", "on", "by",
+        "what", "which", "when", "where", "how", "much", "many", "was", "were", "is",
+        "are", "did", "does", "do", "with", "at", "as", "that", "this", "these", "those",
+        "fiscal", "year", "treasury", "bulletin", "u", "s",
+    }
+    words = re.findall(r"[A-Za-z][A-Za-z0-9$%.-]{2,}", question.lower())
+    keywords = []
+    for word in words:
+        if word not in stopwords and word not in keywords:
+            keywords.append(word)
+    return keywords[:12]
+
+
+def _extract_relevant_snippets(content: str, question: str, budget_chars: int) -> str:
+    """Extract only the most relevant local snippets from a source file."""
+    keywords = _question_keywords(question)
+    lines = [line.rstrip() for line in content.splitlines()]
+    if not lines:
+        return ""
+
+    scored_blocks: list[tuple[int, int, str]] = []
+    window = 3
+    for idx, line in enumerate(lines):
+        lower = line.lower()
+        score = 0
+        for kw in keywords:
+            if kw in lower:
+                score += 2
+        if any(ch.isdigit() for ch in line):
+            score += 1
+        if score <= 0:
+            continue
+        start = max(0, idx - window)
+        end = min(len(lines), idx + window + 1)
+        block = "\n".join(lines[start:end]).strip()
+        if block:
+            scored_blocks.append((score, idx, block))
+
+    if not scored_blocks:
+        # Fallback: keep the beginning only, but much shorter than before.
+        return content[:budget_chars].strip()
+
+    scored_blocks.sort(key=lambda item: (-item[0], item[1]))
+    selected: list[str] = []
+    used = 0
+    seen = set()
+    for _, _, block in scored_blocks:
+        if block in seen:
+            continue
+        block_len = len(block)
+        if used + block_len > budget_chars and selected:
+            break
+        selected.append(block)
+        seen.add(block)
+        used += block_len + 2
+        if used >= budget_chars:
+            break
+    return "\n\n".join(selected).strip()
+
+
+def _load_source_context(question: str, max_chars: int = 28000) -> str:
     """Load relevant Treasury Bulletin source text for a question.
 
     Returns the source document text truncated to fit in LLM context.
@@ -579,11 +718,13 @@ def _load_source_context(question: str, max_chars: int = 120000) -> str:
         try:
             with open(fpath) as f:
                 content = f.read()
-            # Truncate if needed
-            if len(content) > chars_per_file:
-                content = content[:chars_per_file] + "\n[...truncated...]"
-            context_parts.append(f"=== SOURCE: {sf} ===\n{content}")
-            total_chars += len(content)
+            snippet = _extract_relevant_snippets(content, question, chars_per_file)
+            if not snippet:
+                continue
+            if len(snippet) > chars_per_file:
+                snippet = snippet[:chars_per_file].rstrip() + "\n[...truncated...]"
+            context_parts.append(f"=== SOURCE: {sf} ===\n{snippet}")
+            total_chars += len(snippet)
             if total_chars >= max_chars:
                 break
         except Exception as e:
@@ -872,6 +1013,28 @@ def _clean_response(
     - Must not contain "no answer found"
     - Multiple candidate answers = automatic fail (hedge detection)
     """
+    # Strip DeepSeek-R1 <think>...</think> reasoning block
+    # Case 1: complete <think>...</think> — strip it, keep the rest
+    response = re.sub(r'<think>.*?</think>\s*', '', response, flags=re.DOTALL)
+    # Case 2: truncated <think> without closing tag — strip from <think> to end,
+    # but try to salvage any FINAL_ANSWER that might appear after
+    if '<think>' in response and '</think>' not in response:
+        # Check if there's a FINAL_ANSWER after the <think>
+        fa_match = re.search(r'<FINAL_ANSWER>', response, re.IGNORECASE)
+        if fa_match:
+            # Keep everything from FINAL_ANSWER onward
+            response = response[fa_match.start():]
+        else:
+            # No FINAL_ANSWER — the think block consumed everything
+            # Try to extract the last meaningful line as answer
+            think_start = response.index('<think>')
+            after_think = response[think_start + 7:].strip()
+            lines = [l.strip() for l in after_think.split('\n') if l.strip()]
+            if lines:
+                answer = lines[-1]
+                answer = _extract_bare_answer(answer)
+                response = f"<REASONING>\n{after_think}\n</REASONING>\n<FINAL_ANSWER>\n{answer}\n</FINAL_ANSWER>"
+
     # If no FINAL_ANSWER tag, wrap the entire response
     if "<FINAL_ANSWER>" not in response and "<final_answer>" not in response.lower():
         lines = [l.strip() for l in response.strip().split("\n") if l.strip()]
@@ -1114,23 +1277,26 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         elif OPENAI_AVAILABLE and os.environ.get("DEEPINFRA_API_KEY"):
             provider = "deepinfra"
 
-    # Always try to load Treasury source documents first — in OfficeQA all
-    # questions are Treasury-related. This avoids wasting LLM calls on routing.
-    source_context = _load_source_context(prompt)
+    # Route first so non-OfficeQA tasks do not get accidentally absorbed by
+    # Treasury source retrieval just because they contain dates or year/month text.
+    task_type, routing_confidence = _heuristic_task_routing(prompt)
+    if routing_confidence <= 1:
+        llm_task_type = _classify_with_llm(prompt, provider)
+        if llm_task_type:
+            logger.info(f"LLM routing override: {task_type} -> {llm_task_type}")
+            task_type = llm_task_type
 
-    if source_context:
-        # We have Treasury data — use officeqa prompt, skip LLM classifier
-        task_type = "officeqa"
-        logger.info(f"Source context loaded ({len(source_context)} chars) — using officeqa prompt")
+    source_context = ""
+    if task_type == "officeqa":
+        source_context = _load_source_context(prompt)
+        if source_context:
+            logger.info(
+                f"OfficeQA source context loaded ({len(source_context)} chars)"
+            )
+        else:
+            logger.warning("OfficeQA route selected but no Treasury source context found")
     else:
-        # No source context — fall back to heuristic routing
-        task_type, routing_confidence = _heuristic_task_routing(prompt)
-        if routing_confidence <= 1:
-            llm_task_type = _classify_with_llm(prompt, provider)
-            if llm_task_type:
-                logger.info(f"LLM routing override: {task_type} -> {llm_task_type}")
-                task_type = llm_task_type
-        logger.info(f"No source context — task type: {task_type}")
+        logger.info(f"Task type routed to {task_type} — skipping Treasury source retrieval")
 
     system_prompt = SYSTEM_PROMPTS[task_type]
 
