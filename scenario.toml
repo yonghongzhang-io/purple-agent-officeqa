@@ -4,14 +4,15 @@
 # -----------------------------------------------------------------------
 
 [purple_agent]
-agentbeats_id = "YOUR_AGENTBEATS_ID"   # From agentbeats.dev after registration
-image = "ghcr.io/YOUR_GITHUB_USERNAME/purple-agent:latest"
+agentbeats_id = "019d009a-ab04-7b51-b16b-85b8998092f6"   # From agentbeats.dev after registration
+image = "ghcr.io/yonghongzhang-io/purple-agent-officeqa:latest"
 role = "purple_agent"
 
 [purple_agent.environment]
-LLM_PROVIDER = "anthropic"
-ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}"
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
-ANTHROPIC_MAX_TOKENS = "8000"
+LLM_PROVIDER = "nebius"
+NEBIUS_API_KEY = "${NEBIUS_API_KEY}"
+NEBIUS_MODEL = "deepseek-ai/DeepSeek-R1-0528"
 ENABLE_TOOLS = "true"
+ENABLE_WEB_SEARCH = "false"
 MAX_LLM_CALLS = "4"
+MAX_TOKENS = "8000"

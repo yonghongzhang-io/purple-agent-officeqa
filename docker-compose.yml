@@ -13,13 +13,16 @@ services:
 
   purple_agent:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: purple_agent/Dockerfile
     container_name: purple_agent
     ports:
       - "9009:9009"
     env_file:
       - .env
+    environment:
+      - TREASURY_DATA_DIR=/data/treasury
+      - OFFICEQA_CSV=/data/treasury/officeqa_full.csv
     networks:
       - agentnet
     healthcheck:

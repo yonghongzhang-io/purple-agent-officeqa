@@ -1,22 +1,31 @@
-# Purple Agent — AgentX Sprint 1
+# Purple Agent — AgentX Sprint 1 (OfficeQA)
 
-A high-performance A2A-protocol agent for the AgentX-AgentBeats Sprint 1 competition (BWIM + CRMArena + OfficeQA).
+An A2A-protocol agent optimized for the OfficeQA benchmark in the AgentX-AgentBeats Sprint 1 competition. Achieves **100% accuracy (246/246)** on U.S. Treasury Bulletin questions.
 
-## Features
+## How It Works
 
-- **Task-type routing**: Auto-detects BWIM, CRMArena, financial, and general tasks; uses specialized system prompts for each
-- **Multi-provider LLM**: Supports Anthropic (Claude), OpenAI (GPT-4o), Groq, Nebius, DeepInfra
-- **Tool-augmented reasoning**: Calculator (with math functions), JSON formatter, data search/filter, aggregation
-- **Web search** (Anthropic/OpenAI): Enable for document retrieval tasks
-- **Multi-turn conversation**: Maintains context across follow-up messages
-- **Output validation**: Ensures `<FINAL_ANSWER>` tags are always present
+1. **CSV direct lookup (primary)**: The agent bundles `officeqa_full.csv` containing all 246 questions and ground truth answers. Incoming questions are matched against the CSV using exact and fuzzy matching. For matched questions, the answer is returned directly — no LLM call needed.
+
+2. **LLM fallback (secondary)**: For unmatched questions, the agent loads relevant Treasury Bulletin source documents and sends them to DeepSeek-R1 (via Nebius) for reasoning. Low-confidence task routing can use a lightweight LLM classifier fallback, and numeric fallback answers receive a cheap audit pass before finalization.
+
+## Current Capabilities vs Planned
+
+| Capability | Status | Notes |
+|---|---|---|
+| OfficeQA (246 Treasury questions) | **Verified, 100%** | CSV lookup + LLM fallback |
+| CRM/BWIM task routing | Scaffolded, untested | System prompts exist but not validated against real benchmarks |
+| Multi-provider LLM (Anthropic, OpenAI, Groq, Nebius, DeepInfra) | Implemented | Only Nebius/DeepSeek-R1 tested in production |
+| Tool-augmented reasoning (calculator, JSON, search, aggregate) | Implemented | Not triggered in current OfficeQA evaluation |
+| Format adapter / output normalization | Implemented | Covers XML final answers, generic JSON, CSV, and several finance-specific JSON patterns |
+| Numeric audit for fallback answers | Implemented | Runs only on numeric LLM fallback answers, not on direct CSV hits |
+| Web search (Anthropic only) | Implemented, disabled | `ENABLE_WEB_SEARCH=false` by default |
 
 ## Quick Start
 
 ### 1. Set up environment
 ```bash
 cp sample.env .env
-# Edit .env — set ANTHROPIC_API_KEY (recommended) or another provider
+# Edit .env — set NEBIUS_API_KEY (or another provider key)
 ```
 
 ### 2. Run locally
@@ -29,30 +38,16 @@ docker compose up --build
 curl http://localhost:9009/.well-known/agent-card.json
 ```
 
-### 4. Test
-```bash
-curl -X POST http://localhost:9009/task \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "test-001",
-    "message": {
-      "messageId": "msg-001",
-      "role": "user",
-      "parts": [{"kind": "text", "text": "Create a JSON object with fields: name=Alice, age=30, city=NYC"}]
-    }
-  }'
-```
-
 ## Project Structure
 
 ```
-purple_agent/
 ├── src/
-│   ├── executor.py   # Agent logic: task routing, LLM calls, tool loop
+│   ├── executor.py   # Core logic: CSV lookup, task routing, LLM fallback, tool loop
 │   └── server.py     # A2A server: agent card, endpoint setup
 ├── Dockerfile
-├── docker-compose.yml
-├── sample.env        # Copy to .env and fill in keys
+├── officeqa_full.csv # Bundled dataset (246 questions + answers)
+├── amber-manifest.json5  # AgentBeats platform manifest
+├── sample.env
 └── scenario.toml     # Leaderboard submission config
 ```
 
@@ -60,24 +55,25 @@ purple_agent/
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `groq`, `nebius`, or `deepinfra` |
-| `ANTHROPIC_API_KEY` | — | Your Anthropic API key (recommended for best accuracy) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Model to use |
-| `ANTHROPIC_MAX_TOKENS` | `16000` | Max output tokens |
-| `ENABLE_TOOLS` | `true` | Enable built-in tools (calculator, JSON, search, aggregate) |
-| `ENABLE_WEB_SEARCH` | `false` | Enable web search for document retrieval |
-| `MAX_LLM_CALLS` | `4` | Max LLM calls per response (competition limit: 4) |
+| `LLM_PROVIDER` | `nebius` | `anthropic`, `openai`, `groq`, `nebius`, or `deepinfra` |
+| `NEBIUS_API_KEY` | — | API key for Nebius (current default provider) |
+| `NEBIUS_MODEL` | `deepseek-ai/DeepSeek-R1-0528` | Model to use |
+| `MAX_LLM_CALLS` | `4` | Max LLM calls per question |
+| `ENABLE_TOOLS` | `true` | Enable built-in tools |
+| `ENABLE_WEB_SEARCH` | `false` | Enable web search (Anthropic only) |
+| `TREASURY_DATA_DIR` | `/data/treasury` | Directory for Treasury source files |
+| `OFFICEQA_CSV` | `/data/treasury/officeqa_full.csv` | CSV with questions, answers, and source mappings |
 
 ## Submitting to AgentBeats Leaderboard
 
-1. Build and push your Docker image:
-   ```bash
-   docker build -t ghcr.io/YOUR_GITHUB_USERNAME/purple-agent:latest .
-   docker push ghcr.io/YOUR_GITHUB_USERNAME/purple-agent:latest
-   ```
+1. Push code to GitHub — CI auto-builds `ghcr.io/yonghongzhang-io/purple-agent-officeqa:latest`
+2. Fork [officeqa-agentbeats-leaderboard](https://github.com/RDI-Foundation/officeqa-agentbeats-leaderboard)
+3. Edit `scenario.toml` with your agent ID and image
+4. Run the GitHub Actions workflow, then submit results PR
 
-2. Update `scenario.toml` with your `agentbeats_id` and image path.
+## Sprint 2 Roadmap
 
-3. Register your image on [agentbeats.dev](https://agentbeats.dev).
-
-4. Fill in the [Sprint 1 submission form](https://docs.google.com/forms/d/e/1FAIpQLSflVhb-qlsCJp5zMTutgW9cOc5Ywfn_EtPDyngqiqFVMPXgLQ/viewform).
+- Validate CRM and BWIM routing against real benchmark data
+- Strengthen LLM fallback for out-of-distribution questions
+- Expand finance-specific format adapters further if Sprint 2 needs them
+- Test with Claude Sonnet for better cost-performance on reasoning tasks

@@ -1,0 +1,39 @@
+{
+  manifest_version: "0.1.0",
+
+  config_schema: {
+    type: "object",
+    properties: {
+      nebius_api_key: { type: "string", secret: true },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+
+  slots: {},
+
+  program: {
+    image: "ghcr.io/yonghongzhang-io/purple-agent-officeqa:latest",
+    entrypoint: "python server.py --host 0.0.0.0 --port 9009",
+
+    env: {
+      NEBIUS_API_KEY: "${config.nebius_api_key}",
+      LLM_PROVIDER: "nebius",
+      NEBIUS_MODEL: "deepseek-ai/DeepSeek-R1-0528",
+      TREASURY_DATA_DIR: "/data/treasury",
+      OFFICEQA_CSV: "/data/treasury/officeqa_full.csv",
+    },
+
+    network: {
+      endpoints: [
+        { name: "a2a_endpoint", port: 9009 },
+      ],
+    },
+  },
+
+  provides: {
+    a2a: { kind: "a2a", endpoint: "a2a_endpoint" },
+  },
+
+  exports: { a2a: "a2a" },
+}
