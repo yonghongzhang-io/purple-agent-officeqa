@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir \
 
 COPY src/ ./
 COPY officeqa_full.csv /data/treasury/officeqa_full.csv
+COPY treasury_data/*.txt /data/treasury/
 
 EXPOSE 9009
 ENTRYPOINT ["python", "server.py"]
