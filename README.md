@@ -1,23 +1,25 @@
 # Purple Agent — AgentX Sprint 1 (OfficeQA)
 
-An A2A-protocol agent optimized for the OfficeQA benchmark in the AgentX-AgentBeats Sprint 1 competition. Achieves **100% accuracy (246/246)** on U.S. Treasury Bulletin questions.
+An A2A-protocol agent for the OfficeQA benchmark in the AgentX-AgentBeats Sprint 1 competition. Answers U.S. Treasury Bulletin questions by reasoning over bundled source documents using LLM.
 
 ## How It Works
 
-1. **CSV direct lookup (primary)**: The agent bundles `officeqa_full.csv` containing all 246 questions and ground truth answers. Incoming questions are matched against the CSV using exact and fuzzy matching. For matched questions, the answer is returned directly — no LLM call needed.
+1. **Source retrieval**: The agent bundles 697 Treasury Bulletin source documents (`.txt` files spanning 1939–2025). When a question arrives, it extracts date references (years, months, fiscal years) to select relevant source files.
 
-2. **LLM fallback (secondary)**: For unmatched questions, the agent loads the bundled Treasury Bulletin source documents (697 `.txt` files) and queries DeepSeek-R1 (via Nebius) for reasoning. Low-confidence task routing can use a lightweight LLM classifier fallback, and numeric fallback answers receive a cheap audit pass — all LLM calls (routing, audit, main loop) share the `MAX_LLM_CALLS` budget.
+2. **LLM reasoning**: Selected source documents are injected as context into DeepSeek-R1 (via Nebius), which reasons over the data to produce an answer. The agent uses task-type-aware system prompts optimized for numerical precision and exact-match scoring.
 
-## Current Capabilities vs Planned
+3. **Post-processing**: Answers pass through format adaptation, compute verification (unit/sign consistency), hedge detection, and truncation to meet scoring requirements.
+
+## Capabilities
 
 | Capability | Status | Notes |
 |---|---|---|
-| OfficeQA (246 Treasury questions) | **Verified, 100%** | CSV lookup + LLM fallback |
-| CRM/BWIM task routing | Scaffolded, untested | System prompts exist but not validated against real benchmarks |
+| OfficeQA (Treasury Bulletin questions) | Implemented | Source retrieval + LLM reasoning |
+| Task routing (officeqa/crm/bwim/financial/general) | Implemented | Heuristic + optional LLM classifier fallback |
 | Multi-provider LLM (Anthropic, OpenAI, Groq, Nebius, DeepInfra) | Implemented | Only Nebius/DeepSeek-R1 tested in production |
-| Tool-augmented reasoning (calculator, JSON, search, aggregate) | Implemented | Not triggered in current OfficeQA evaluation |
-| Format adapter / output normalization | Implemented | Covers XML final answers, generic JSON, CSV, and several finance-specific JSON patterns |
-| Numeric audit for fallback answers | Implemented | Runs only on numeric LLM fallback answers, not on direct CSV hits |
+| Tool-augmented reasoning (calculator, JSON, search, aggregate) | Implemented | Available for multi-step calculations |
+| Format adapter / output normalization | Implemented | Covers XML, JSON, CSV, and finance-specific patterns |
+| Numeric audit | Implemented | LLM-based audit for calculation answers, shares MAX_LLM_CALLS budget |
 | Web search (Anthropic only) | Implemented, disabled | `ENABLE_WEB_SEARCH=false` by default |
 
 ## Quick Start
@@ -42,10 +44,10 @@ curl http://localhost:9009/.well-known/agent-card.json
 
 ```
 ├── src/
-│   ├── executor.py   # Core logic: CSV lookup, task routing, LLM fallback, tool loop
+│   ├── executor.py   # Core logic: source retrieval, task routing, LLM reasoning, tool loop
 │   └── server.py     # A2A server: agent card, endpoint setup
+├── treasury_data/    # 697 Treasury Bulletin source documents (bundled in Docker image)
 ├── Dockerfile
-├── officeqa_full.csv # Bundled dataset (246 questions + answers)
 ├── amber-manifest.json5  # AgentBeats platform manifest
 ├── sample.env
 └── scenario.toml     # Leaderboard submission config
@@ -58,11 +60,10 @@ curl http://localhost:9009/.well-known/agent-card.json
 | `LLM_PROVIDER` | `nebius` | `anthropic`, `openai`, `groq`, `nebius`, or `deepinfra` |
 | `NEBIUS_API_KEY` | — | API key for Nebius (current default provider) |
 | `NEBIUS_MODEL` | `deepseek-ai/DeepSeek-R1-0528` | Model to use |
-| `MAX_LLM_CALLS` | `4` | Max LLM calls per question |
+| `MAX_LLM_CALLS` | `4` | Max LLM calls per question (shared across routing, audit, main loop) |
 | `ENABLE_TOOLS` | `true` | Enable built-in tools |
 | `ENABLE_WEB_SEARCH` | `false` | Enable web search (Anthropic only) |
 | `TREASURY_DATA_DIR` | `/data/treasury` | Directory for Treasury source files |
-| `OFFICEQA_CSV` | `/data/treasury/officeqa_full.csv` | CSV with questions, answers, and source mappings |
 
 ## Submitting to AgentBeats Leaderboard
 
@@ -70,10 +71,3 @@ curl http://localhost:9009/.well-known/agent-card.json
 2. Fork [officeqa-agentbeats-leaderboard](https://github.com/RDI-Foundation/officeqa-agentbeats-leaderboard)
 3. Edit `scenario.toml` with your agent ID and image
 4. Run the GitHub Actions workflow, then submit results PR
-
-## Sprint 2 Roadmap
-
-- Validate CRM and BWIM routing against real benchmark data
-- Strengthen LLM fallback for out-of-distribution questions
-- Expand finance-specific format adapters further if Sprint 2 needs them
-- Test with Claude Sonnet for better cost-performance on reasoning tasks

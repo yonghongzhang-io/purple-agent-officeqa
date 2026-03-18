@@ -21,7 +21,6 @@
       LLM_PROVIDER: "nebius",
       NEBIUS_MODEL: "deepseek-ai/DeepSeek-R1-0528",
       TREASURY_DATA_DIR: "/data/treasury",
-      OFFICEQA_CSV: "/data/treasury/officeqa_full.csv",
     },
 
     network: {

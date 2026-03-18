@@ -1,10 +1,8 @@
 import asyncio
-import csv
 import json
 import logging
 import os
 import re
-from difflib import SequenceMatcher
 from uuid import uuid4
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -455,10 +453,9 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Treasury data lookup — load source documents for OfficeQA questions
+# Treasury source corpus — keyword-based retrieval (no answer data)
 # ---------------------------------------------------------------------------
-_question_to_sources: dict[str, list[str]] = {}  # question text -> list of source filenames
-_question_to_answer: dict[str, str] = {}  # question text -> ground truth answer
+_treasury_source_files: list[str] = []  # cached list of .txt filenames
 
 
 def _resolve_treasury_data_dir() -> str:
@@ -475,106 +472,90 @@ def _resolve_treasury_data_dir() -> str:
     return os.environ.get("TREASURY_DATA_DIR", "/data/treasury")
 
 
-def _resolve_officeqa_csv() -> str:
-    """Resolve the OfficeQA CSV path across mounted and repo-local layouts."""
-    candidates = [
-        os.environ.get("OFFICEQA_CSV"),
-        os.path.join(_resolve_treasury_data_dir(), "officeqa_full.csv"),
-        os.path.join(os.getcwd(), "officeqa_full.csv"),
-        os.path.join(os.getcwd(), "..", "officeqa_full.csv"),
-    ]
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return os.path.abspath(candidate)
-    return os.environ.get("OFFICEQA_CSV", "/data/treasury/officeqa_full.csv")
-
-
 _treasury_data_dir = _resolve_treasury_data_dir()
-_officeqa_csv = _resolve_officeqa_csv()
 
 
-def _load_question_mapping():
-    """Load the CSV mapping questions to source files and answers (done once at startup)."""
-    global _question_to_sources, _question_to_answer
-    if _question_to_sources:
-        return
-    if not os.path.exists(_officeqa_csv):
-        logger.warning(f"OfficeQA CSV not found at {_officeqa_csv}, skipping data lookup")
-        return
+def _list_source_files() -> list[str]:
+    """List all Treasury Bulletin .txt files in the data directory (cached)."""
+    global _treasury_source_files
+    if _treasury_source_files:
+        return _treasury_source_files
     try:
-        with open(_officeqa_csv) as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                q = row.get("question", "").strip()
-                answer = row.get("answer", "").strip()
-                sources_raw = row.get("source_files", "")
-                sources = []
-                for part in sources_raw.replace("\n", ",").split(","):
-                    s = part.strip()
-                    if s and s.endswith(".txt"):
-                        sources.append(s)
-                if q:
-                    if sources:
-                        _question_to_sources[q] = sources
-                    if answer:
-                        _question_to_answer[q] = answer
-        logger.info(f"Loaded {len(_question_to_sources)} source mappings, {len(_question_to_answer)} answer mappings")
+        _treasury_source_files = sorted(
+            f for f in os.listdir(_treasury_data_dir)
+            if f.endswith(".txt") and f.startswith("treasury_bulletin_")
+        )
+        logger.info(f"Found {len(_treasury_source_files)} Treasury source files")
     except Exception as e:
-        logger.warning(f"Failed to load OfficeQA CSV: {e}")
-
-
-def _lookup_direct_answer(question: str) -> str | None:
-    """Try to find the exact answer from the CSV for a matching question.
-
-    Returns the answer string if found, None otherwise.
-    """
-    _load_question_mapping()
-    if not _question_to_answer:
-        return None
-
-    q = question.strip()
-
-    # Exact match
-    if q in _question_to_answer:
-        logger.info(f"DIRECT ANSWER HIT (exact match)")
-        return _question_to_answer[q]
-
-    # Fuzzy match
-    best_answer = None
-    best_ratio = 0.0
-    for stored_q, answer in _question_to_answer.items():
-        ratio = SequenceMatcher(None, q[:300].lower(), stored_q[:300].lower()).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_answer = answer
-    if best_ratio > 0.85 and best_answer:
-        logger.info(f"DIRECT ANSWER HIT (fuzzy match, ratio={best_ratio:.3f})")
-        return best_answer
-
-    return None
+        logger.warning(f"Failed to list Treasury source files: {e}")
+    return _treasury_source_files
 
 
 def _find_source_files(question: str) -> list[str]:
-    """Find the source files for a given question using fuzzy matching."""
-    _load_question_mapping()
-    if not _question_to_sources:
+    """Find relevant Treasury source files by extracting dates from the question.
+
+    Uses year/month mentions in the question to select matching files.
+    Falls back to loading all files for the mentioned fiscal year(s).
+    """
+    available = _list_source_files()
+    if not available:
         return []
 
-    # Try exact match first
-    if question.strip() in _question_to_sources:
-        return _question_to_sources[question.strip()]
+    lower = question.lower()
+    matched = []
 
-    # Fuzzy match — find the closest question
-    best_match = None
-    best_ratio = 0.0
-    for stored_q, sources in _question_to_sources.items():
-        ratio = SequenceMatcher(None, question[:200].lower(), stored_q[:200].lower()).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_match = sources
-    if best_ratio > 0.7 and best_match:
-        return best_match
-    return []
+    # Extract explicit year-month patterns: "January 2020", "March 1945", etc.
+    month_map = {
+        "january": "01", "february": "02", "march": "03", "april": "04",
+        "may": "05", "june": "06", "july": "07", "august": "08",
+        "september": "09", "october": "10", "november": "11", "december": "12",
+    }
+    for month_name, month_num in month_map.items():
+        pattern = rf'{month_name}\s+(\d{{4}})'
+        for m in re.finditer(pattern, lower):
+            year = m.group(1)
+            fname = f"treasury_bulletin_{year}_{month_num}.txt"
+            if fname in available and fname not in matched:
+                matched.append(fname)
+
+    # Extract standalone years (4 digits between 1939-2025)
+    years_found = set()
+    for m in re.finditer(r'\b(19[3-9]\d|20[0-2]\d)\b', lower):
+        years_found.add(m.group(1))
+
+    # "fiscal year YYYY" typically ends in September of that year
+    for m in re.finditer(r'fiscal\s+year\s+(\d{4})', lower):
+        fy = m.group(1)
+        years_found.add(fy)
+        # Fiscal year YYYY runs Oct (YYYY-1) to Sep (YYYY) — add key months
+        prev_year = str(int(fy) - 1)
+        for month in ["10", "11", "12"]:
+            fname = f"treasury_bulletin_{prev_year}_{month}.txt"
+            if fname in available and fname not in matched:
+                matched.append(fname)
+        for month in ["01", "02", "03", "04", "05", "06", "07", "08", "09"]:
+            fname = f"treasury_bulletin_{fy}_{month}.txt"
+            if fname in available and fname not in matched:
+                matched.append(fname)
+
+    # For standalone years without month, add all months of that year
+    if not matched:
+        for year in sorted(years_found):
+            for month in ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]:
+                fname = f"treasury_bulletin_{year}_{month}.txt"
+                if fname in available and fname not in matched:
+                    matched.append(fname)
+
+    # Limit to avoid overloading context
+    if len(matched) > 24:
+        matched = matched[:24]
+
+    if matched:
+        logger.info(f"Source retrieval: {len(matched)} files for years {sorted(years_found)}")
+    else:
+        logger.warning(f"No source files matched for question: {question[:100]}...")
+
+    return matched
 
 
 def _load_source_context(question: str, max_chars: int = 120000) -> str:
@@ -882,7 +863,6 @@ def _clean_response(
     response: str,
     original_prompt: str = "",
     provider: str = "",
-    used_direct_lookup: bool = False,
 ) -> str:
     """Ensure the response has well-formed FINAL_ANSWER tags and meets scoring requirements.
 
@@ -914,7 +894,7 @@ def _clean_response(
         # Compute verifier — check units, signs, consistency (zero API cost)
         if original_prompt:
             answer = _verify_computation(original_prompt, answer)
-            if _should_run_numeric_audit(original_prompt, answer, used_direct_lookup):
+            if _should_run_numeric_audit(original_prompt, answer):
                 answer = _verify_with_llm(original_prompt, answer, provider)
 
         # Truncate to 500 chars
@@ -1044,9 +1024,7 @@ def _classify_with_llm(prompt: str, provider: str) -> str | None:
     return None
 
 
-def _should_run_numeric_audit(question: str, answer: str, used_direct_lookup: bool) -> bool:
-    if used_direct_lookup:
-        return False
+def _should_run_numeric_audit(question: str, answer: str) -> bool:
     if not re.findall(r'-?\d[\d,]*\.?\d*', answer):
         return False
     return bool(
@@ -1146,13 +1124,6 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     system_prompt = SYSTEM_PROMPTS[task_type]
     logger.info(f"Detected task type: {task_type} (confidence={routing_confidence})")
 
-    # Try direct CSV answer lookup first for ALL questions (no LLM needed)
-    # All 246 OfficeQA questions are in the CSV — task_type detection may miss some
-    direct_answer = _lookup_direct_answer(prompt)
-    if direct_answer:
-        logger.info(f"Using direct CSV answer: {direct_answer}")
-        return f"<REASONING>\nDirect lookup from Treasury Bulletin dataset.\n</REASONING>\n<FINAL_ANSWER>\n{direct_answer}\n</FINAL_ANSWER>"
-
     # Format adapter — detect output format from task text (zero API cost)
     fmt_key, fmt_directive = _detect_output_format(prompt)
     if fmt_key:
@@ -1198,7 +1169,6 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         response,
         original_prompt=prompt,
         provider=provider,
-        used_direct_lookup=False,
     )
 
 
