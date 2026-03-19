@@ -1013,27 +1013,22 @@ def _clean_response(
     - Must not contain "no answer found"
     - Multiple candidate answers = automatic fail (hedge detection)
     """
-    # Strip DeepSeek-R1 <think>...</think> reasoning block
-    # Case 1: complete <think>...</think> — strip it, keep the rest
+    # Strip ALL DeepSeek-R1 <think> content aggressively
+    # Step 1: strip complete <think>...</think> blocks
     response = re.sub(r'<think>.*?</think>\s*', '', response, flags=re.DOTALL)
-    # Case 2: truncated <think> without closing tag — strip from <think> to end,
-    # but try to salvage any FINAL_ANSWER that might appear after
-    if '<think>' in response and '</think>' not in response:
-        # Check if there's a FINAL_ANSWER after the <think>
-        fa_match = re.search(r'<FINAL_ANSWER>', response, re.IGNORECASE)
-        if fa_match:
-            # Keep everything from FINAL_ANSWER onward
-            response = response[fa_match.start():]
+    # Step 2: strip truncated <think> (no closing tag) — remove from <think> to next closing XML tag or end
+    while '<think>' in response:
+        idx = response.index('<think>')
+        # Find next </FINAL_ANSWER> or </REASONING> after <think>
+        after = response[idx:]
+        close = re.search(r'</(?:FINAL_ANSWER|REASONING)>', after, re.IGNORECASE)
+        if close:
+            # Remove just the <think>...up to the closing tag
+            response = response[:idx] + after[close.start():]
         else:
-            # No FINAL_ANSWER — the think block consumed everything
-            # Try to extract the last meaningful line as answer
-            think_start = response.index('<think>')
-            after_think = response[think_start + 7:].strip()
-            lines = [l.strip() for l in after_think.split('\n') if l.strip()]
-            if lines:
-                answer = lines[-1]
-                answer = _extract_bare_answer(answer)
-                response = f"<REASONING>\n{after_think}\n</REASONING>\n<FINAL_ANSWER>\n{answer}\n</FINAL_ANSWER>"
+            # No closing tag — remove everything from <think> onward
+            response = response[:idx].strip()
+        break
 
     # If no FINAL_ANSWER tag, wrap the entire response
     if "<FINAL_ANSWER>" not in response and "<final_answer>" not in response.lower():
@@ -1045,6 +1040,23 @@ def _clean_response(
     match = re.search(r'<FINAL_ANSWER>(.*?)</FINAL_ANSWER>', response, re.DOTALL | re.IGNORECASE)
     if match:
         answer = match.group(1).strip()
+
+        # Strip any <think> remnants that leaked into FINAL_ANSWER
+        answer = re.sub(r'<think>.*?</think>\s*', '', answer, flags=re.DOTALL)
+        if '<think>' in answer:
+            answer = answer[:answer.index('<think>')].strip()
+        answer = answer.strip()
+
+        # If FINAL_ANSWER is empty after stripping <think>, extract from REASONING
+        if not answer:
+            reasoning_match = re.search(r'<REASONING>(.*?)</REASONING>', response, re.DOTALL | re.IGNORECASE)
+            if reasoning_match:
+                reasoning = reasoning_match.group(1).strip()
+                lines = [l.strip() for l in reasoning.split('\n') if l.strip()]
+                if lines:
+                    answer = lines[-1]
+                    answer = _extract_bare_answer(answer)
+                    logger.info(f"FINAL_ANSWER was empty — extracted from REASONING: {answer[:100]}")
 
         # Reject "no answer found" — judge auto-fails this
         if "no answer found" in answer.lower():
