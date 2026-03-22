@@ -1,0 +1,21 @@
+[project]
+name = "purple-agent"
+version = "1.0.0"
+description = "Purple Agent — OfficeQA Treasury Bulletin QA agent for AgentX competition"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.20",
+    "uvicorn>=0.38.0",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.1.1",
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.1",
+]

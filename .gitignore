@@ -1,3 +1,8 @@
 .env
 __pycache__/
 *.pyc
+.DS_Store
+officeqa_full.csv
+treasury_data/officeqa_full.csv
+treasury_data/treasury_bulletins_transformed.zip
+worker06.env
