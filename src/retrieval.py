@@ -149,6 +149,48 @@ _TABLE_FAMILY_MATCHERS: dict[str, dict[str, list[str]]] = {
             "public debt operations",
         ],
     },
+    "bill_rates": {
+        "codes": ["pdo"],
+        "keywords": [
+            "13-week",
+            "26-week",
+            "91-day",
+            "182-day",
+            "treasury-bill rates",
+            "average rate",
+            "average issuing rate",
+            "investment rate",
+            "discount rate",
+            "equivalent coupon issue yield",
+        ],
+    },
+    "auction_results": {
+        "codes": ["pdo"],
+        "keywords": [
+            "accepted tenders",
+            "amount of bids accepted",
+            "bids submitted",
+            "competitive",
+            "noncompetitive",
+            "rollover tenders",
+            "offerings of notes",
+            "offerings of bills",
+            "public offerings of marketable securities other than regular weekly treasury bills",
+        ],
+    },
+    "maturity_schedule": {
+        "codes": ["tso"],
+        "keywords": [
+            "maturity schedule",
+            "maturing",
+            "description of securities",
+            "amount outstanding",
+            "held by u.s. govt. accounts",
+            "held by federal reserve banks",
+            "all other investors",
+            "interest-bearing marketable public debt securities",
+        ],
+    },
     "agency_expense": {
         "codes": [],
         "keywords": [
@@ -161,6 +203,26 @@ _TABLE_FAMILY_MATCHERS: dict[str, dict[str, list[str]]] = {
             "analysis of national defense expenditures",
             "budget receipts and expenditures",
             "general government expenditures",
+        ],
+    },
+    "calendar_defense": {
+        "codes": [],
+        "keywords": [
+            "analysis of national defense expenditures",
+            "expenditures for national defense and related activities",
+            "calendar yr",
+            "calendar year",
+            "individual calendar months",
+        ],
+    },
+    "general_expenditures": {
+        "codes": [],
+        "keywords": [
+            "analysis of general expenditures",
+            "departments and agencies",
+            "budget expenditures",
+            "general government expenditures",
+            "public works",
         ],
     },
     "national_defense": {
@@ -267,7 +329,19 @@ def _extract_focus_phrases(question: str) -> list[str]:
         r"\b26-week\b",
         r"\b2-year treasury notes?\b",
         r"\btreasury[- ]bill rates?\b",
+        r"\baccepted tenders\b",
+        r"\bamount of bids accepted\b",
+        r"\bnoncash rollover tenders\b",
+        r"\bcompetitive\b",
+        r"\bnoncompetitive\b",
+        r"\baverage issuing rate\b",
+        r"\binvestment rate\b",
+        r"\bdiscount rate\b",
+        r"\bequivalent coupon issue yield\b",
         r"\bofferings of bills\b",
+        r"\bdescription of securities\b",
+        r"\ball other investors\b",
+        r"\bamount outstanding\b",
         r"\bmarketable securities\b",
         r"\binterest[- ]bearing marketable public debt securities\b",
         r"\bclaims owed\b",
@@ -411,8 +485,18 @@ def _detect_table_families(question: str, profile: dict[str, object] | None = No
         add("fcp")
     if re.search(r"\b(13-week|26-week|treasury-bill|auction|accepted tenders|issue date|maturing)\b", q_lower):
         add("auction")
+    if profile.get("wants_bill_rate_data"):
+        add("bill_rates")
+    if profile.get("wants_auction_bid_data"):
+        add("auction_results")
+    if profile.get("wants_maturity_schedule"):
+        add("maturity_schedule")
     if re.search(r"\b(veterans administration|national defense|public works|expenditures?)\b", q_lower):
         add("agency_expense")
+    if profile.get("wants_calendar_year") and re.search(r"\bnational defense\b", q_lower):
+        add("calendar_defense")
+    if re.search(r"\b(expenditures?|departments and agencies|general expenditures)\b", q_lower):
+        add("general_expenditures")
     if re.search(r"\bnational defense\b", q_lower):
         add("national_defense")
     if re.search(r"\b(veterans administration|public works)\b", q_lower):
@@ -669,9 +753,97 @@ def _question_keywords(question: str) -> list[str]:
 
 def _extract_years(question: str) -> list[str]:
     """Extract all explicit years from the question."""
-    years = list(set(re.findall(r"\b(19[2-9]\d|20[0-2]\d)\b", question)))
+    years = set(re.findall(r"\b(19[2-9]\d|20[0-2]\d)\b", question))
+    range_patterns = [
+        r"\bfrom\s+(19[2-9]\d|20[0-2]\d)\s+to\s+(19[2-9]\d|20[0-2]\d)\b",
+        r"\bbetween\s+(19[2-9]\d|20[0-2]\d)\s+and\s+(19[2-9]\d|20[0-2]\d)\b",
+        r"\b(19[2-9]\d|20[0-2]\d)\s*[-–—]\s*(19[2-9]\d|20[0-2]\d)\b",
+    ]
+    for pattern in range_patterns:
+        for start_text, end_text in re.findall(pattern, question, re.IGNORECASE):
+            start_year = int(start_text)
+            end_year = int(end_text)
+            if start_year > end_year:
+                start_year, end_year = end_year, start_year
+            if 0 < end_year - start_year <= 20:
+                years.update(str(year) for year in range(start_year, end_year + 1))
+    years = list(years)
     years.sort()
     return years
+
+
+def _extract_dimension_terms(question: str, profile: dict[str, object] | None = None) -> list[str]:
+    """Extract row/column-style cues that should appear near the target table cells."""
+    q_lower = question.lower()
+    profile = profile or {}
+    terms: list[str] = []
+
+    def add(term: str) -> None:
+        term = term.strip().lower()
+        if term and term not in terms:
+            terms.append(term)
+
+    direct_terms = [
+        "competitive",
+        "noncompetitive",
+        "accepted tenders",
+        "amount of bids accepted",
+        "bids submitted",
+        "rollover tenders",
+        "noncash rollover tenders",
+        "all other investors",
+        "held by u.s. govt. accounts",
+        "held by federal reserve banks",
+        "amount outstanding",
+        "description of securities",
+        "outlays",
+        "receipts",
+        "actual",
+        "calendar year",
+        "calendar yr",
+        "fiscal year",
+        "grand total",
+        "total outstanding",
+        "gross federal debt",
+        "summary of public debt",
+        "debt outstanding",
+    ]
+    for term in direct_terms:
+        if term in q_lower:
+            add(term)
+
+    if profile.get("wants_calendar_year") or profile.get("wants_monthly_series"):
+        add("calendar year")
+        add("calendar yr")
+    if profile.get("wants_bill_rate_data"):
+        for term in [
+            "average rate",
+            "average issuing rate",
+            "investment rate",
+            "discount rate",
+            "equivalent coupon issue yield",
+            "91-day",
+            "182-day",
+        ]:
+            add(term)
+    if profile.get("wants_auction_bid_data"):
+        for term in [
+            "accepted tenders",
+            "amount of bids accepted",
+            "competitive",
+            "noncompetitive",
+            "rollover tenders",
+        ]:
+            add(term)
+    if profile.get("wants_maturity_schedule"):
+        for term in [
+            "description of securities",
+            "amount outstanding",
+            "all other investors",
+            "held by u.s. govt. accounts",
+        ]:
+            add(term)
+    return terms
 
 
 def _build_question_profile(question: str) -> dict[str, object]:
@@ -719,6 +891,57 @@ def _build_question_profile(question: str) -> dict[str, object]:
         "january" in q_lower
         and "debt" in q_lower
         and any(phrase in q_lower for phrase in ["list the", "comma separated list", "inclusive"])
+    )
+    wants_calendar_year = "calendar year" in q_lower or "calendar yr" in q_lower
+    wants_monthly_series = any(
+        phrase in q_lower
+        for phrase in [
+            "all individual calendar months",
+            "monthly values",
+            "each year from",
+            "comma separated list",
+        ]
+    )
+    wants_auction_bid_data = any(
+        phrase in q_lower
+        for phrase in [
+            "accepted tenders",
+            "amount of bids accepted",
+            "bids submitted",
+            "rollover tenders",
+            "noncash rollover tenders",
+            "competitive",
+            "noncompetitive",
+            "investors submitted",
+        ]
+    )
+    wants_bill_rate_data = (
+        any(phrase in q_lower for phrase in ["13-week", "26-week", "91-day", "182-day"])
+        and any(phrase in q_lower for phrase in ["rate", "rates", "yield", "yields", "discount"])
+    ) or any(
+        phrase in q_lower
+        for phrase in [
+            "treasury-bill rates",
+            "treasury bill rates",
+            "average issuing rate",
+            "investment rate",
+            "discount rate",
+            "equivalent coupon issue yield",
+        ]
+    )
+    wants_maturity_schedule = (
+        "maturing" in q_lower
+        and not wants_bill_rate_data
+        and not wants_auction_bid_data
+    ) or any(
+        phrase in q_lower
+        for phrase in [
+            "held by all other investors",
+            "held by federal reserve banks",
+            "amount outstanding",
+            "description of securities",
+            "maturity schedule",
+        ]
     )
     return {
         "expects_list": any(
@@ -799,6 +1022,11 @@ def _build_question_profile(question: str) -> dict[str, object]:
         "maturity_year": maturity_year,
         "wants_tax_regression": wants_tax_regression,
         "wants_january_debt_series": wants_january_debt_series,
+        "wants_calendar_year": wants_calendar_year,
+        "wants_monthly_series": wants_monthly_series,
+        "wants_auction_bid_data": wants_auction_bid_data,
+        "wants_bill_rate_data": wants_bill_rate_data,
+        "wants_maturity_schedule": wants_maturity_schedule,
     }
 
 
@@ -861,6 +1089,15 @@ def build_officeqa_strategy(question: str) -> str:
                 "Prefer the row/column intersection that best matches the requested entity, year, month, and unit.",
             ]
         )
+
+    if profile.get("wants_bill_rate_data"):
+        hints.append("Prefer Treasury-bill rate or yield tables over accepted-tenders or amount-submitted tables.")
+    if profile.get("wants_auction_bid_data"):
+        hints.append("Prefer auction-result tables with accepted tenders, competitive, noncompetitive, or rollover columns.")
+    if profile.get("wants_maturity_schedule"):
+        hints.append("Prefer maturity-schedule tables with amount outstanding, description of securities, and investor-holding columns.")
+    if profile.get("wants_calendar_year"):
+        hints.append("Prefer calendar-year tables or rows over fiscal-year summary tables unless the question explicitly asks for fiscal year.")
 
     if profile.get("months"):
         hints.append("Month cues are important here; prefer rows and columns that explicitly mention the requested month names.")
@@ -1069,6 +1306,7 @@ def _score_table_block(
     unit_hint = _normalize_text(str(table.get("unit_hint", "")))
     table_code = str(table.get("table_code", ""))
     family_text = "\n".join([title, text, unit_hint])
+    dimension_terms = _extract_dimension_terms(question, profile)
 
     for keyword in keywords:
         keyword_norm = _normalize_text(keyword)
@@ -1100,6 +1338,10 @@ def _score_table_block(
     if months:
         month_hits = sum(1 for month in months if month in title or month in text)
         score += month_hits * 8
+    if dimension_terms:
+        dimension_hits = sum(1 for term in dimension_terms if term in family_text)
+        if dimension_hits:
+            score += min(dimension_hits, 5) * 9
 
     if profile.get("expects_sum") and re.search(r"\b(total|sum|gross|net|outstanding|balance|receipts|outlays|expenditures?)\b", title + "\n" + text):
         score += 20
@@ -1117,6 +1359,12 @@ def _score_table_block(
             score += 16
     if profile.get("expects_date") and re.search(r"\bdate\b|\bissue\b|\bmaturity\b", title + "\n" + text):
         score += 18
+    if profile.get("wants_calendar_year") and re.search(r"\bcalendar yr\b|\bcalendar year\b", family_text):
+        score += 26
+    if profile.get("wants_calendar_year") and re.search(r"\bcomplete fiscal years?\b|\bfiscal year\b", family_text) and not re.search(r"\bcalendar yr\b|\bcalendar year\b", family_text):
+        score -= 18
+    if profile.get("wants_monthly_series") and len(re.findall(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z.]*\b", family_text)) >= 6:
+        score += 20
 
     if "million" in lower_question and "million" in unit_hint:
         score += 12
@@ -1247,8 +1495,58 @@ def _score_table_block(
         score += 20
     if "fcp" in families and re.search(r"\b(statement of net cost|assets, liabilities, and net position of the fund)\b", family_text):
         score -= 16
+    if "bill_rates" in families:
+        if re.search(r"\b(average rate|average issuing rate|investment rate|discount rate|equivalent coupon issue yield|91-day|182-day)\b", family_text):
+            score += 42
+        if re.search(r"\b(accepted tenders|amount of bids accepted|competitive|noncompetitive|rollover tenders)\b", family_text):
+            score -= 38
+    if "auction_results" in families:
+        if re.search(r"\b(accepted tenders|amount of bids accepted|competitive|noncompetitive|rollover tenders|bids submitted)\b", family_text):
+            score += 44
+        if re.search(r"\b(maturity schedule|description of securities|amount outstanding|all other investors)\b", family_text):
+            score -= 42
+    if "maturity_schedule" in families:
+        if re.search(r"\b(maturity schedule|description of securities|amount outstanding|all other investors|held by federal reserve banks)\b", family_text):
+            score += 42
+        if re.search(r"\b(accepted tenders|amount of bids accepted|average issuing rate|investment rate|discount rate)\b", family_text):
+            score -= 42
+    if "calendar_defense" in families:
+        if re.search(r"\b(analysis of national defense expenditures|expenditures for national defense and related activities)\b", family_text):
+            score += 54
+        if re.search(r"\b(summary table on budget receipts and expenditures|budget receipts and expenditures|summary of fiscal statistics)\b", family_text):
+            score -= 30
+    if "general_expenditures" in families:
+        if re.search(r"\b(analysis of general expenditures|departments and agencies)\b", family_text):
+            score += 26
+        if re.search(r"\bsummary table on budget receipts and expenditures\b", family_text):
+            score -= 14
     if (title.startswith("[") or title.lower().startswith("in ")) and not table_code:
         score -= 12
+
+    # Penalise unnamed table blocks — they likely failed title extraction and
+    # will confuse downstream ranking / prompt assembly.
+    if title.startswith("Table block near line"):
+        score -= 25
+
+    # --- Stronger auction sub-family cross-pollution penalties ---
+    # When the question asks about bill *rates*, penalise "offerings of bills"
+    # and "accepted tenders" tables that talk about bid amounts, not rates.
+    if "bill_rates" in families and re.search(
+        r"\b(offerings of bills|public debt operations.*offerings)\b", family_text
+    ):
+        score -= 45
+    # When the question asks about notes, heavily penalise bills tables
+    if "auction" in families and "notes" in lower_question and re.search(
+        r"\bofferings of bills\b", family_text
+    ) and not re.search(r"\bnotes?\b", family_text):
+        score -= 50
+    # When the question asks about bills auction *results* (bids/tenders),
+    # penalise rate tables
+    if "auction_results" in families and re.search(
+        r"\b(average rate|average issuing rate|investment rate|discount rate|equivalent coupon issue yield)\b",
+        family_text,
+    ):
+        score -= 40
 
     if families and not matched_family and table_code:
         known_prefixes = {
@@ -1258,6 +1556,68 @@ def _score_table_block(
         }
         if any(table_code.startswith(prefix) for prefix in known_prefixes):
             score -= 10
+
+    return score
+
+
+def _score_source_file_cheap(
+    filename: str,
+    question: str,
+    keywords: list[str],
+    years: list[str],
+    profile: dict[str, object],
+    families: list[str],
+    dimension_terms: list[str],
+) -> int:
+    """Fast pre-filter score using only heading summary + filename time proximity.
+
+    Does NOT call _extract_table_blocks or _score_table_block, making it ~50x
+    cheaper than _score_source_file.  Used to narrow 697 files to ~30 candidates
+    before running the expensive scorer.
+    """
+    heading_summary = _normalize_text(_load_heading_summary(filename))
+    score = 0
+
+    # Keyword hits in headings (cheap — headings are cached short strings)
+    for kw in keywords:
+        kw_norm = _normalize_text(kw)
+        if not kw_norm:
+            continue
+        if kw_norm in heading_summary:
+            hits = heading_summary.count(kw_norm)
+            score += min(hits, 3) * (8 if " " in kw_norm else 3)
+
+    # Dimension term hits in headings
+    if dimension_terms and heading_summary:
+        dim_hits = sum(1 for term in dimension_terms if term in heading_summary)
+        if dim_hits:
+            score += min(dim_hits, 5) * 8
+
+    # Time proximity (same logic as full scorer, but standalone)
+    if years:
+        target_year = int(years[0])
+        file_year, file_month = _file_year_month(filename)
+        if file_year:
+            is_fiscal = "fiscal" in question.lower() or "fy" in question.lower()
+            if is_fiscal:
+                earliest_year, earliest_month = target_year - 1, 10
+            else:
+                earliest_year, earliest_month = target_year, 1
+            months_after = (file_year - earliest_year) * 12 + (file_month - earliest_month)
+            if months_after >= 0:
+                if months_after <= 12:
+                    score += 24 - months_after
+                elif months_after <= 48:
+                    score += max(4, 14 - (months_after - 12) // 3)
+            elif months_after >= -12:
+                score += 3
+
+    # Family code match in headings
+    for family in families:
+        family_rules = _TABLE_FAMILY_MATCHERS.get(family, {})
+        kw_hits = sum(1 for kw in family_rules.get("keywords", []) if kw in heading_summary)
+        if kw_hits:
+            score += min(kw_hits, 4) * 6
 
     return score
 
@@ -1272,6 +1632,7 @@ def _score_source_file(filename: str, question: str) -> int:
     if not preview:
         return 0
     heading_summary = _normalize_text(_load_heading_summary(filename))
+    dimension_terms = _extract_dimension_terms(question, profile)
 
     preview_sections = _split_into_sections(preview)
     if not preview_sections:
@@ -1300,6 +1661,10 @@ def _score_source_file(filename: str, question: str) -> int:
                 score += min(phrase_hits, 3) * 6
         elif len(kw_norm) >= 6 and kw_norm in norm_content:
             score += 2
+    if dimension_terms and heading_summary:
+        dimension_hits = sum(1 for term in dimension_terms if term in heading_summary)
+        if dimension_hits:
+            score += min(dimension_hits, 5) * 8
 
     if years:
         target_year = int(years[0])
@@ -1345,6 +1710,11 @@ def _score_source_file(filename: str, question: str) -> int:
                     score += 14
                     if 1 <= file_month <= 4:
                         score += 8
+            if "calendar_defense" in families and not is_fiscal:
+                if target_year <= file_year <= target_year + 2:
+                    score += 22
+                if file_year >= target_year and 1 <= file_month <= 4:
+                    score += 10
             if "veterans_public_works" in families and profile.get("mentions_veterans_admin"):
                 if (file_year, file_month) == (target_year + 10, 1):
                     score += 120
@@ -1433,6 +1803,21 @@ def _score_source_file(filename: str, question: str) -> int:
                 score += 36
             if "offerings of bills" in heading_summary and "notes" not in heading_summary:
                 score -= 24
+        if "bill_rates" in families:
+            if re.search(r"\b(average rate|average issuing rate|investment rate|discount rate|equivalent coupon issue yield)\b", heading_summary):
+                score += 30
+            if re.search(r"\b(accepted tenders|amount of bids accepted|competitive|noncompetitive)\b", heading_summary):
+                score -= 34
+        if "auction_results" in families:
+            if re.search(r"\b(accepted tenders|amount of bids accepted|competitive|noncompetitive|rollover tenders)\b", heading_summary):
+                score += 34
+            if re.search(r"\b(maturity schedule|description of securities|amount outstanding|all other investors)\b", heading_summary):
+                score -= 38
+        if "maturity_schedule" in families:
+            if re.search(r"\b(maturity schedule|description of securities|amount outstanding|all other investors)\b", heading_summary):
+                score += 34
+            if re.search(r"\b(accepted tenders|amount of bids accepted|average rate|investment rate|discount rate)\b", heading_summary):
+                score -= 38
         if "cm" in families:
             if "total claims by type and country" in heading_summary or "total liabilities by type and country" in heading_summary:
                 score += 26
@@ -1485,6 +1870,16 @@ def _score_source_file(filename: str, question: str) -> int:
                 score += 30
             if "summary of fiscal statistics" in heading_summary or "analysis of general expenditures" in heading_summary:
                 score -= 16
+        if "calendar_defense" in families:
+            if "analysis of national defense expenditures" in heading_summary or "expenditures for national defense and related activities" in heading_summary:
+                score += 40
+            if "summary table on budget receipts and expenditures" in heading_summary or "budget receipts and expenditures" in heading_summary:
+                score -= 24
+        if "general_expenditures" in families:
+            if "analysis of general expenditures" in heading_summary or "departments and agencies" in heading_summary:
+                score += 22
+            if "summary table on budget receipts and expenditures" in heading_summary:
+                score -= 12
         if "veterans_public_works" in families:
             if (
                 "veterans administration" in heading_summary
@@ -1780,8 +2175,24 @@ def _find_source_files(question: str) -> list[str]:
                         matched.append(fname)
 
     if _needs_global_file_search(profile, families):
-        global_ranked = sorted(
+        # Two-stage ranking: cheap prefilter on all 697 files, then expensive
+        # full scoring on only the top 30 candidates.  This cuts retrieval time
+        # from ~60s to ~5s for global-search questions.
+        _gkeywords = _question_keywords(question)
+        _gyears = _extract_years(question)
+        _gdimension = _extract_dimension_terms(question, profile)
+        cheap_ranked = sorted(
             available,
+            key=lambda fname: (
+                -_score_source_file_cheap(
+                    fname, question, _gkeywords, _gyears, profile, families, _gdimension
+                ),
+                fname,
+            ),
+        )[:30]
+        # Now run the expensive scorer on only 30 candidates
+        global_ranked = sorted(
+            cheap_ranked,
             key=lambda fname: (-_score_source_file(fname, question), fname),
         )[: max(18, max_files * 4)]
         for fname in global_ranked:
@@ -1829,6 +2240,14 @@ def _score_line_window(lines: list[str], start: int, end: int, keywords: list[st
     score += min(table_lines, 12) + heading_hits
 
     lower_text = text.lower()
+    if profile.get("wants_bill_rate_data") and re.search(r"\b(average rate|average issuing rate|investment rate|discount rate|equivalent coupon issue yield)\b", lower_text):
+        score += 12
+    if profile.get("wants_auction_bid_data") and re.search(r"\b(accepted tenders|amount of bids accepted|competitive|noncompetitive|rollover tenders)\b", lower_text):
+        score += 12
+    if profile.get("wants_maturity_schedule") and re.search(r"\b(description of securities|amount outstanding|all other investors)\b", lower_text):
+        score += 12
+    if profile.get("wants_calendar_year") and re.search(r"\bcalendar yr\b|\bcalendar year\b", lower_text):
+        score += 10
     if profile.get("expects_sum") or profile.get("expects_difference"):
         if re.search(r"\b(total|sum|gross|net|difference|balance|outstanding|cost|receipts|outlays)\b", lower_text):
             score += 12
@@ -1905,6 +2324,85 @@ def _extract_windowed_table_snippets(section: str, question: str, budget_chars: 
     return "\n\n".join(parts).strip()
 
 
+def _narrow_table_rows(table_text: str, question: str, max_rows: int = 20) -> str:
+    """Narrow a pipe-delimited table to the header + rows most relevant to the question.
+
+    Keeps the first row (header) and up to *max_rows* rows that mention years,
+    months, or key entities from the question.  This dramatically reduces token
+    waste and prevents the LLM from reading the wrong row.
+    """
+    lines = [line for line in table_text.splitlines() if line.strip()]
+    if len(lines) <= max_rows + 2:
+        # Table is already small enough — return as-is
+        return table_text
+
+    q_lower = question.lower()
+    years = set(re.findall(r"\b(19[2-9]\d|20[0-2]\d)\b", question))
+    months_in_q = set()
+    for m in _MONTH_MAP:
+        if m in q_lower:
+            months_in_q.add(m)
+
+    # Collect row-level entities from the question for matching
+    row_terms: list[str] = []
+    for phrase in _extract_focus_phrases(question):
+        row_terms.append(phrase.lower())
+    for ent in _extract_named_entities(question):
+        if len(ent) > 3:
+            row_terms.append(ent.lower())
+
+    # Always keep header rows (first 1-2 pipe rows) and separator rows
+    header_lines: list[str] = []
+    data_lines: list[tuple[int, str]] = []  # (score, line)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Keep separator rows (e.g., |---|---|)
+        if re.match(r"^[\s|:-]+$", stripped.replace("-", "")):
+            header_lines.append(line)
+            continue
+        # First 2 lines are likely headers
+        if i < 2:
+            header_lines.append(line)
+            continue
+
+        # Score each data row
+        row_score = 0
+        line_lower = stripped.lower()
+        for year in years:
+            if year in stripped:
+                row_score += 10
+        for month in months_in_q:
+            if month in line_lower:
+                row_score += 5
+        for term in row_terms:
+            if term in line_lower:
+                row_score += 8
+        # Rows with "total" are often useful
+        if re.search(r"\btotal\b", line_lower):
+            row_score += 3
+
+        data_lines.append((row_score, line))
+
+    # Sort data rows by score, keep top max_rows
+    data_lines.sort(key=lambda x: -x[0])
+    # Keep rows that score > 0, up to max_rows
+    relevant = [(s, l) for s, l in data_lines if s > 0][:max_rows]
+    if not relevant:
+        # No rows matched — keep the first max_rows data rows as fallback
+        relevant = data_lines[:max_rows]
+
+    # Re-order by original position to preserve table structure
+    original_order = {line: i for i, line in enumerate(lines)}
+    relevant_lines = sorted(
+        [l for _, l in relevant],
+        key=lambda l: original_order.get(l, 9999),
+    )
+
+    result_lines = header_lines + relevant_lines
+    return "\n".join(result_lines)
+
+
 def _extract_relevant_snippets(filename: str, content: str, question: str, budget_chars: int) -> str:
     """Extract table-aware snippets from the most relevant parts of a source file."""
     keywords = _question_keywords(question)
@@ -1926,6 +2424,8 @@ def _extract_relevant_snippets(filename: str, content: str, question: str, budge
             table_text = str(table.get("text", "")).strip()
             if not table_text:
                 continue
+            # Row/column narrowing: trim large tables to relevant rows only
+            table_text = _narrow_table_rows(table_text, question, max_rows=20)
             block_parts = []
             if title:
                 block_parts.append(f"TABLE TITLE: {title}")
