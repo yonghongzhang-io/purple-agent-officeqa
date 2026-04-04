@@ -5,13 +5,6 @@
     type: "object",
     properties: {
       kimi_api_key: { type: "string", secret: true },
-      anthropic_api_key: { type: "string", secret: true },
-      nebius_api_key: { type: "string", secret: true },
-      groq_api_key: { type: "string", secret: true },
-      kimi_research_key_01: { type: "string", secret: true },
-      kimi_research_key_02: { type: "string", secret: true },
-      kimi_research_key_03: { type: "string", secret: true },
-      kimi_research_key_04: { type: "string", secret: true },
     },
     required: ["kimi_api_key"],
     additionalProperties: false,
@@ -23,17 +16,11 @@
 
   program: {
     image: "ghcr.io/yonghongzhang-io/purple-agent-officeqa:latest",
-    entrypoint: "uv run src/server.py --host 0.0.0.0 --port 9009",
+    entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9009",
 
     env: {
+      PORT: "9009",
       KIMI_API_KEY: "${config.kimi_api_key}",
-      ANTHROPIC_API_KEY: "${config.anthropic_api_key}",
-      NEBIUS_API_KEY: "${config.nebius_api_key}",
-      GROQ_API_KEY: "${config.groq_api_key}",
-      KIMI_RESEARCH_KEY_01: "${config.kimi_research_key_01}",
-      KIMI_RESEARCH_KEY_02: "${config.kimi_research_key_02}",
-      KIMI_RESEARCH_KEY_03: "${config.kimi_research_key_03}",
-      KIMI_RESEARCH_KEY_04: "${config.kimi_research_key_04}",
       LLM_PROVIDER: "kimi",
       KIMI_MODEL: "kimi-k2.5",
       NEBIUS_MODEL: "deepseek-ai/DeepSeek-R1-0528",

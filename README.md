@@ -58,8 +58,10 @@ This project is Railway-ready via the included `Dockerfile` and `railway.toml`.
 3. Optional overrides:
    - `LLM_PROVIDER=kimi`
    - `KIMI_MODEL=kimi-k2.5`
-   - `MAX_SOURCE_FILES=3`
-   - `MAX_LLM_CALLS=5`
+   - `MAX_SOURCE_FILES=2`
+   - `MAX_LLM_CALLS=4`
+   - `MAX_TOKENS=6000`
+   - `LLM_MAX_CONCURRENCY=2`
 4. Railway will inject `PORT` automatically. The server now respects that port and uses `RAILWAY_PUBLIC_DOMAIN` to build a correct public agent-card URL.
 5. After deploy, verify:
 
@@ -102,15 +104,17 @@ curl https://YOUR_DOMAIN.up.railway.app/.well-known/agent-card.json
 | `ENABLE_NUMERIC_AUDIT` | `false` | Disable extra LLM audit during benchmark runs |
 | `ENABLE_WEB_SEARCH` | `false` | Enable web search (Anthropic only) |
 | `TREASURY_DATA_DIR` | `/home/agent/treasury_data` in Docker; auto-detected locally | Directory for Treasury source files |
-| `MAX_SOURCE_FILES` | `3` | Maximum number of Treasury source files to inspect per question |
+| `MAX_SOURCE_FILES` | `2` | Maximum number of Treasury source files to inspect per question |
 | `SOURCE_FOLLOWUP_YEARS` | `6` | Search later bulletins when a question references a target year |
-| `SOURCE_PREVIEW_CHARS` | `16000` | Preview size for lexical reranking |
-| `MAX_LLM_CALLS` | `5` | Max LLM calls per question (shared across routing, audit, main loop) |
+| `SOURCE_PREVIEW_CHARS` | `8000` | Preview size for lexical reranking |
+| `SOURCE_MAX_CHARS` | `12000` | Final cap on Treasury context characters injected into the model |
+| `MAX_LLM_CALLS` | `4` | Max LLM calls per question (shared across routing, audit, main loop) |
 | `MAX_API_RETRIES` | `1` | Per-call retry cap for upstream provider errors |
-| `LLM_MAX_CONCURRENCY` | `1` | Process-level cap on concurrent upstream LLM requests |
+| `LLM_MAX_CONCURRENCY` | `2` | Process-level cap on concurrent upstream LLM requests |
+| `MAX_TOKENS` | `6000` | Upper bound for generated completion tokens in benchmark-safe mode |
 | `NUM_ROLLOUTS` | `1` | Number of answer rollouts before optional voting |
-| `VOTE_TEMPERATURE` | `0.2` | Temperature for extra rollouts when voting is enabled |
-| `CODE_TIMEOUT` | `5` | Timeout in seconds for the Python calculation tool |
+| `VOTE_TEMPERATURE` | `0.4` | Temperature for extra rollouts when voting is enabled |
+| `CODE_TIMEOUT` | `30` | Timeout in seconds for the Python calculation tool |
 
 ## Submitting to AgentBeats Leaderboard
 
