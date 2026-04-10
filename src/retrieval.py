@@ -2202,10 +2202,25 @@ def _find_source_files(question: str) -> list[str]:
     if matched:
         matched = _select_best_source_files(matched, question, max_files, pinned=pinned)
     else:
-        matched = _select_best_source_files(available, question, max_files, pinned=pinned)
+        # BM25-style keyword fallback: score ALL files by keyword overlap when
+        # date filtering produced no candidates. This catches questions about
+        # topics not tied to a specific date (e.g., "What table shows X?").
+        _bm25_kw = _question_keywords(question)
+        _bm25_years = _extract_years(question)
+        _bm25_dim = _extract_dimension_terms(question, profile)
+        bm25_ranked = sorted(
+            available,
+            key=lambda fname: (
+                -_score_source_file_cheap(
+                    fname, question, _bm25_kw, _bm25_years, profile, families, _bm25_dim
+                ),
+                fname,
+            ),
+        )[:max(20, max_files * 5)]
+        matched = _select_best_source_files(bm25_ranked, question, max_files, pinned=pinned)
         if matched:
             logger.info(
-                f"Lexical source fallback selected {len(matched)} files for undated question"
+                f"BM25 keyword fallback selected {len(matched)} files for undated question"
             )
 
     if direct_refs:

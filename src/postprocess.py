@@ -651,10 +651,32 @@ def _salvage_officeqa_answer(question: str, answer: str, response: str) -> str:
         if percent and (_is_placeholder_answer(answer) or _is_suspicious_officeqa_answer(question, answer)):
             return percent
 
-    if _is_placeholder_answer(answer) or _looks_like_list_answer(answer) or _is_suspicious_officeqa_answer(question, answer):
+    if _is_placeholder_answer(answer):
+        # Answer is clearly bad (placeholder) — aggressive salvage is safe
         candidate = _select_scalar_candidate(question, combined)
         if candidate:
+            logger.info(f"Salvage: placeholder '{answer[:50]}' → '{candidate}'")
             return candidate
+    elif _is_suspicious_officeqa_answer(question, answer):
+        # Answer exists but looks wrong — only replace if we have high confidence
+        candidate = _select_scalar_candidate(question, combined)
+        if candidate:
+            # Don't override if the existing answer has a valid number and the
+            # candidate is from a different magnitude (could be a different row)
+            existing_val, _ = _parse_scalar_token(answer.strip())
+            candidate_val, _ = _parse_scalar_token(candidate.strip())
+            if existing_val is not None and candidate_val is not None:
+                # Only salvage if existing is clearly wrong (e.g., year vs dollar)
+                ratio = abs(candidate_val / existing_val) if existing_val != 0 else Decimal("999")
+                if Decimal("0.01") < ratio < Decimal("100"):
+                    # Same order of magnitude — keep original, it may have context
+                    logger.debug(f"Salvage skipped: existing={answer[:50]} candidate={candidate} (similar magnitude)")
+                else:
+                    logger.info(f"Salvage: suspicious '{answer[:50]}' → '{candidate}' (magnitude mismatch)")
+                    return candidate
+            else:
+                logger.info(f"Salvage: suspicious '{answer[:50]}' → '{candidate}'")
+                return candidate
 
     if _question_unit(question):
         return _convert_unit_for_question(question, answer)
