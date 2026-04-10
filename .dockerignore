@@ -1,0 +1,17 @@
+# Prevent answer files from leaking into Docker image
+officeqa_full.csv
+treasury_data/officeqa_full.csv
+*.csv
+
+# Development files
+.git
+.github
+.env
+*.env
+worker06.env
+__pycache__
+*.pyc
+.DS_Store
+tests/
+scripts/
+README.md
