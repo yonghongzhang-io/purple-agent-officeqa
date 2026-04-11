@@ -562,6 +562,52 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         )
 
     # ------------------------------------------------------------------
+    # DIFFICULTY-BASED MODEL ROUTING
+    # Easy questions → Kimi only (fast, cheap)
+    # Hard questions → Kimi extracts + DeepSeek V3 answers (accurate math)
+    # ------------------------------------------------------------------
+    def _estimate_difficulty(q: str) -> str:
+        q_lower = q.lower()
+        hard_signals = 0
+        # Multi-step calculation signals
+        if any(kw in q_lower for kw in [
+            "percent change", "percentage change", "absolute change",
+            "rate of change", "growth rate", "ratio",
+        ]):
+            hard_signals += 2
+        # Aggregation signals
+        if any(kw in q_lower for kw in [
+            "sum of", "total sum", "all individual months",
+            "aggregate", "combined total", "net change",
+        ]):
+            hard_signals += 2
+        # Multi-year comparison
+        import re as _re
+        years = _re.findall(r'\b(?:19[3-9]\d|20[0-2]\d)\b', q_lower)
+        if len(set(years)) >= 2:
+            hard_signals += 1
+        # Complex phrasing
+        if any(kw in q_lower for kw in [
+            "rounded to", "nearest", "reported as",
+            "using specifically only", "corresponding",
+        ]):
+            hard_signals += 1
+        if len(q) > 300:
+            hard_signals += 1
+        return "hard" if hard_signals >= 2 else "easy"
+
+    question_difficulty = _estimate_difficulty(prompt)
+    smart_routing = os.environ.get("SMART_ROUTING", "true").lower() == "true"
+    cross_check_provider_env = os.environ.get("CROSS_CHECK_PROVIDER", "").lower()
+
+    if smart_routing and question_difficulty == "hard" and cross_check_provider_env:
+        # Hard question: use the cross-check model as PRIMARY for Pass 2
+        # (DeepSeek V3 is better at math than Kimi K2.5)
+        logger.info(f"SMART ROUTING: difficulty={question_difficulty} → primary={cross_check_provider_env} for answer, kimi for extraction")
+    else:
+        logger.info(f"SMART ROUTING: difficulty={question_difficulty} → primary={provider}")
+
+    # ------------------------------------------------------------------
     # TWO-PASS STRATEGY: Read → Extract → Answer
     # Pass 1: LLM reads the full source and extracts the exact table/rows needed
     # Pass 2: LLM answers precisely from the extracted snippet
@@ -635,10 +681,15 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     raw_responses: list[str] = []
     voted_answers: list[str] = []
 
+    # For hard questions with smart routing, use cross-check provider as primary
+    effective_provider = provider
+    if smart_routing and question_difficulty == "hard" and cross_check_provider and cross_check_provider in providers.PROVIDER_DEFAULTS:
+        effective_provider = cross_check_provider
+
     for idx in range(num_rollouts):
         providers._reset_llm_budget()
         rollout_temperature = 0 if idx == 0 else vote_temperature
-        if provider == "anthropic":
+        if effective_provider == "anthropic":
             response = _call_anthropic(
                 messages,
                 enable_tools,
@@ -646,9 +697,9 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
                 system_prompt,
                 rollout_temperature,
             )
-        elif provider in providers.PROVIDER_DEFAULTS:
+        elif effective_provider in providers.PROVIDER_DEFAULTS:
             response = _call_openai_compatible(
-                provider,
+                effective_provider,
                 messages,
                 enable_tools,
                 context_id,
@@ -676,12 +727,16 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     # ------------------------------------------------------------------
     # Cross-check with backup model (if configured)
     # ------------------------------------------------------------------
-    if cross_check_provider and cross_check_provider in providers.PROVIDER_DEFAULTS:
+    # For smart routing: if primary was switched to cross_check model for hard questions,
+    # use the ORIGINAL provider (kimi) as the cross-checker instead
+    actual_cross_provider = provider if effective_provider != provider else cross_check_provider
+
+    if actual_cross_provider and actual_cross_provider in providers.PROVIDER_DEFAULTS:
         try:
             providers._reset_llm_budget()
-            logger.info(f"Cross-checking with backup model: {cross_check_provider}")
+            logger.info(f"Cross-checking with backup model: {actual_cross_provider}")
             cross_response = providers._call_openai_compatible(
-                cross_check_provider, messages, enable_tools, context_id + "_cross",
+                actual_cross_provider, messages, enable_tools, context_id + "_cross",
                 system_prompt, 0, tools_openai=TOOLS_OPENAI if enable_tools else None,
                 execute_tool=execute_tool if enable_tools else None,
             )
