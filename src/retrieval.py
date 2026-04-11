@@ -1675,24 +1675,35 @@ def _score_source_file_cheap(
         if dim_hits:
             score += min(dim_hits, 5) * 8
 
-    # Time proximity (same logic as full scorer, but standalone)
+    # Time proximity — anchor on the LATEST year (not first) + publication lag
+    # Treasury data for year Y typically appears in bulletins Y+1 to Y+2.
     if years:
-        target_year = int(years[0])
+        # Use max year as anchor — correct for range/span questions
+        target_year = max(int(y) for y in years)
         file_year, file_month = _file_year_month(filename)
         if file_year:
             is_fiscal = "fiscal" in question.lower() or "fy" in question.lower()
             if is_fiscal:
+                # FY ends Sep 30; bulletins appear Oct-Mar of next year
                 earliest_year, earliest_month = target_year - 1, 10
+                ideal_year, ideal_month = target_year, 3  # sweet spot
             else:
+                # Calendar year data appears in bulletins 1-6 months later
                 earliest_year, earliest_month = target_year, 1
+                ideal_year, ideal_month = target_year + 1, 3  # sweet spot
+
             months_after = (file_year - earliest_year) * 12 + (file_month - earliest_month)
+            # Bonus for being in the publication window (0-18 months after data period)
             if months_after >= 0:
-                if months_after <= 12:
-                    score += 24 - months_after
+                if months_after <= 6:
+                    score += 28 - months_after  # strong preference for 1-6 months after
+                elif months_after <= 18:
+                    score += max(8, 22 - months_after)
                 elif months_after <= 48:
-                    score += max(4, 14 - (months_after - 12) // 3)
-            elif months_after >= -12:
-                score += 3
+                    score += max(2, 10 - (months_after - 18) // 4)
+            elif months_after >= -6:
+                # Bulletin slightly before the data period — still plausible
+                score += 6
 
     # Family code match in headings
     for family in families:
@@ -1749,7 +1760,7 @@ def _score_source_file(filename: str, question: str) -> int:
             score += min(dimension_hits, 5) * 8
 
     if years:
-        target_year = int(years[0])
+        target_year = max(int(y) for y in years)
         file_year, file_month = _file_year_month(filename)
         if file_year:
             is_fiscal = "fiscal" in question.lower() or "fy" in question.lower()
@@ -1759,12 +1770,14 @@ def _score_source_file(filename: str, question: str) -> int:
                 earliest_year, earliest_month = target_year, 1
             months_after = (file_year - earliest_year) * 12 + (file_month - earliest_month)
             if months_after >= 0:
-                if months_after <= 12:
-                    score += 24 - months_after
+                if months_after <= 6:
+                    score += 28 - months_after
+                elif months_after <= 18:
+                    score += max(8, 22 - months_after)
                 elif months_after <= 48:
-                    score += max(4, 14 - (months_after - 12) // 3)
-            elif months_after >= -12:
-                score += 3
+                    score += max(2, 10 - (months_after - 18) // 4)
+            elif months_after >= -6:
+                score += 6
 
             if profile.get("months"):
                 expected_months = {int(_MONTH_MAP[m]) for m in profile["months"] if m in _MONTH_MAP}
@@ -2438,13 +2451,25 @@ def _extract_windowed_table_snippets(section: str, question: str, budget_chars: 
     return "\n\n".join(parts).strip()
 
 
-def _narrow_table_rows(table_text: str, question: str, max_rows: int = 20) -> str:
+def _narrow_table_rows(table_text: str, question: str, max_rows: int = 40, profile: dict | None = None) -> str:
     """Narrow a pipe-delimited table to the header + rows most relevant to the question.
 
     Keeps the first row (header) and up to *max_rows* rows that mention years,
     months, or key entities from the question.  This dramatically reduces token
     waste and prevents the LLM from reading the wrong row.
+
+    For series/stat/list questions (monthly sums, geometric means, regression),
+    skip narrowing entirely — the LLM needs ALL rows.
     """
+    # Skip narrowing for questions that need full monthly/yearly series
+    if profile and (
+        profile.get("expects_series_math")
+        or profile.get("expects_regression")
+        or profile.get("expects_list")
+        or profile.get("wants_monthly_series")
+    ):
+        return table_text
+
     lines = [line for line in table_text.splitlines() if line.strip()]
     if len(lines) <= max_rows + 2:
         # Table is already small enough — return as-is
@@ -2539,7 +2564,7 @@ def _extract_relevant_snippets(filename: str, content: str, question: str, budge
             if not table_text:
                 continue
             # Row/column narrowing: trim large tables to relevant rows only
-            table_text = _narrow_table_rows(table_text, question, max_rows=20)
+            table_text = _narrow_table_rows(table_text, question, max_rows=40, profile=profile)
             block_parts = []
             if title:
                 block_parts.append(f"TABLE TITLE: {title}")
@@ -2629,9 +2654,23 @@ def _load_source_context(
 
     context_parts = []
     total_chars = 0
-    chars_per_file = max_chars // max(len(source_files), 1)
 
-    for sf in source_files:
+    # Weighted allocation: best-ranked file gets the most context.
+    # Files are already sorted by relevance score from _find_source_files.
+    # Pattern: 40% for #1, 25% for #2, remaining split evenly among the rest.
+    n = len(source_files)
+    if n == 1:
+        file_budgets = [max_chars]
+    elif n == 2:
+        file_budgets = [int(max_chars * 0.55), int(max_chars * 0.45)]
+    else:
+        b1 = int(max_chars * 0.40)
+        b2 = int(max_chars * 0.25)
+        rest = (max_chars - b1 - b2) // max(n - 2, 1)
+        file_budgets = [b1, b2] + [rest] * (n - 2)
+
+    for i, sf in enumerate(source_files):
+        chars_per_file = file_budgets[i] if i < len(file_budgets) else file_budgets[-1]
         fpath = os.path.join(_treasury_data_dir, sf)
         if not os.path.exists(fpath):
             logger.warning(f"Source file not found: {fpath}")
