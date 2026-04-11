@@ -696,16 +696,24 @@ def _clean_response(
     verify_with_llm: Callable[[str, str, str], str] | None = None,
     should_run_numeric_audit: Callable[[str, str], bool] | None = None,
 ) -> str:
+    # Robust <think> tag removal — handles DeepSeek-R1's various formats:
+    # 1. Properly closed: <think>...</think>
+    # 2. Unclosed: <think>... (no closing tag)
+    # 3. Nested or malformed tags
+    # Strategy: remove all closed pairs first, then strip any remaining unclosed <think> blocks
     response = re.sub(r"<think>.*?</think>\s*", "", response, flags=re.DOTALL)
-    while "<think>" in response:
-        idx = response.index("<think>")
-        after = response[idx:]
-        close = re.search(r"</(?:FINAL_ANSWER|REASONING)>", after, re.IGNORECASE)
-        if close:
-            response = response[:idx] + after[close.start():]
+    if "<think>" in response:
+        # Unclosed <think> — keep only content BEFORE it, unless FINAL_ANSWER follows
+        think_idx = response.index("<think>")
+        after_think = response[think_idx:]
+        # Check if there's a FINAL_ANSWER or REASONING tag after the unclosed <think>
+        answer_match = re.search(r"<(?:FINAL_ANSWER|REASONING)>", after_think, re.IGNORECASE)
+        if answer_match:
+            # Keep content before <think> + content from the answer tag onward
+            response = response[:think_idx].strip() + "\n" + after_think[answer_match.start():]
         else:
-            response = response[:idx].strip()
-        break
+            # No answer tag after <think> — just remove everything from <think> onward
+            response = response[:think_idx].strip()
 
     if "<FINAL_ANSWER>" not in response and "<final_answer>" not in response.lower():
         lines = [line.strip() for line in response.strip().split("\n") if line.strip()]

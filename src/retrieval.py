@@ -754,6 +754,9 @@ def _question_keywords(question: str) -> list[str]:
 def _extract_years(question: str) -> list[str]:
     """Extract all explicit years from the question."""
     years = set(re.findall(r"\b(19[2-9]\d|20[0-2]\d)\b", question))
+    # Also match FY-prefixed years: FY2023, FY 2023, FY2022-2024
+    for fy_match in re.finditer(r"(?:FY|fy|Fiscal\s*Year)\s*(\d{4})", question):
+        years.add(fy_match.group(1))
     range_patterns = [
         r"\bfrom\s+(19[2-9]\d|20[0-2]\d)\s+to\s+(19[2-9]\d|20[0-2]\d)\b",
         r"\bbetween\s+(19[2-9]\d|20[0-2]\d)\s+and\s+(19[2-9]\d|20[0-2]\d)\b",
@@ -2149,7 +2152,7 @@ def _find_source_files(question: str) -> list[str]:
     if years_found and min(int(year) for year in years_found) < 1950:
         followup_years = max(followup_years, 10)
 
-    for match in re.finditer(r"fiscal\s+year\s+(\d{4})", lower):
+    for match in re.finditer(r"(?:fiscal\s+year|FY)\s*(\d{4})", lower, re.IGNORECASE):
         fy = match.group(1)
         years_found.add(fy)
         prev_year = str(int(fy) - 1)
@@ -2339,7 +2342,7 @@ def _extract_windowed_table_snippets(section: str, question: str, budget_chars: 
     return "\n\n".join(parts).strip()
 
 
-def _narrow_table_rows(table_text: str, question: str, max_rows: int = 20) -> str:
+def _narrow_table_rows(table_text: str, question: str, max_rows: int = 40) -> str:
     """Narrow a pipe-delimited table to the header + rows most relevant to the question.
 
     Keeps the first row (header) and up to *max_rows* rows that mention years,
@@ -2385,7 +2388,7 @@ def _narrow_table_rows(table_text: str, question: str, max_rows: int = 20) -> st
         row_score = 0
         line_lower = stripped.lower()
         for year in years:
-            if year in stripped:
+            if re.search(r'\b' + re.escape(year) + r'\b', stripped):
                 row_score += 10
         for month in months_in_q:
             if month in line_lower:
