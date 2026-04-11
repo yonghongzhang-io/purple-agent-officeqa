@@ -561,6 +561,60 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
             f"QUESTION:\n{prompt}"
         )
 
+    # ------------------------------------------------------------------
+    # TWO-PASS STRATEGY: Read → Extract → Answer
+    # Pass 1: LLM reads the full source and extracts the exact table/rows needed
+    # Pass 2: LLM answers precisely from the extracted snippet
+    # This mimics how a human expert would solve it: skim the full doc first,
+    # then focus on the relevant section.
+    # ------------------------------------------------------------------
+    two_pass = os.environ.get("TWO_PASS", "true").lower() == "true"
+
+    if two_pass and source_context and len(source_context) > 5000:
+        extract_prompt = (
+            "You are a Treasury Bulletin data extraction expert.\n\n"
+            "REFERENCE DATA:\n\n"
+            f"{source_context}\n\n"
+            "---\n\n"
+            f"QUESTION: {prompt}\n\n"
+            "---\n\n"
+            "TASK: Extract ONLY the specific table rows, column headers, and numeric values "
+            "needed to answer this question. Include the table title, units (millions/billions), "
+            "and any footnotes. Do NOT answer the question yet — just extract the relevant data.\n\n"
+            "Format your extraction as:\n"
+            "TABLE TITLE: ...\n"
+            "UNITS: ...\n"
+            "RELEVANT ROWS:\n"
+            "- [row label]: [value]\n"
+            "- [row label]: [value]\n"
+            "KEY VALUES FOR CALCULATION: ..."
+        )
+        try:
+            extraction = providers._call_openai_compatible(
+                provider, [{"role": "user", "content": extract_prompt}],
+                False, context_id, "You extract precise data from Treasury Bulletins.",
+                0, tools_openai=None, execute_tool=None,
+            )
+            logger.info(f"Pass 1 extraction: {len(extraction)} chars")
+            # Pass 2: answer from the focused extraction
+            augmented_prompt = (
+                "EXTRACTED DATA (from U.S. Treasury Bulletin — verified extraction):\n\n"
+                f"{extraction}\n\n"
+                "---\n\n"
+                "ORIGINAL REFERENCE DATA (for cross-checking):\n\n"
+                f"{source_context[:15000]}\n\n"
+                "---\n\n"
+                "QUESTION-SHAPE SOLVER INSTRUCTIONS:\n"
+                f"{strategy_hint}\n\n"
+                "---\n\n"
+                f"QUESTION:\n{prompt}\n\n"
+                "IMPORTANT: Use the EXTRACTED DATA above as your primary source. "
+                "Cross-check against the ORIGINAL REFERENCE DATA. "
+                "Show your calculation step by step."
+            )
+        except Exception as e:
+            logger.warning(f"Two-pass extraction failed, falling back to single pass: {e}")
+
     messages = [{"role": "user", "content": augmented_prompt}]
 
     enable_tools = os.environ.get("ENABLE_TOOLS", "false").lower() == "true"
