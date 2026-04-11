@@ -625,6 +625,13 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     num_rollouts = max(1, int(os.environ.get("NUM_ROLLOUTS", "1")))
     vote_temperature = float(os.environ.get("VOTE_TEMPERATURE", "0.2"))
 
+    # ------------------------------------------------------------------
+    # MULTI-MODEL CROSS-CHECK: run primary model + backup model, vote
+    # If CROSS_CHECK_PROVIDER is set, run a second model and pick the
+    # answer that both agree on, or fall back to primary.
+    # ------------------------------------------------------------------
+    cross_check_provider = os.environ.get("CROSS_CHECK_PROVIDER", "").lower()
+
     raw_responses: list[str] = []
     voted_answers: list[str] = []
 
@@ -666,7 +673,31 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         raw_responses.append(cleaned)
         voted_answers.append(_extract_final_answer_text(cleaned))
 
-    if num_rollouts == 1:
+    # ------------------------------------------------------------------
+    # Cross-check with backup model (if configured)
+    # ------------------------------------------------------------------
+    if cross_check_provider and cross_check_provider in providers.PROVIDER_DEFAULTS:
+        try:
+            providers._reset_llm_budget()
+            logger.info(f"Cross-checking with backup model: {cross_check_provider}")
+            cross_response = providers._call_openai_compatible(
+                cross_check_provider, messages, enable_tools, context_id + "_cross",
+                system_prompt, 0, tools_openai=TOOLS_OPENAI if enable_tools else None,
+                execute_tool=execute_tool if enable_tools else None,
+            )
+            cross_cleaned = _clean_response(
+                cross_response, original_prompt=prompt, provider=cross_check_provider,
+                task_type=task_type, verify_with_llm=providers._verify_with_llm,
+                should_run_numeric_audit=providers._should_run_numeric_audit,
+            )
+            cross_answer = _extract_final_answer_text(cross_cleaned)
+            voted_answers.append(cross_answer)
+            raw_responses.append(cross_cleaned)
+            logger.info(f"Cross-check answer: {cross_answer[:80]}")
+        except Exception as e:
+            logger.warning(f"Cross-check with {cross_check_provider} failed: {e}")
+
+    if len(voted_answers) == 1:
         return raw_responses[0]
 
     voted = _vote_answers(voted_answers)

@@ -33,7 +33,7 @@ except ImportError:
 PROVIDER_DEFAULTS = {
     "openai": (None, "gpt-4o"),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
-    "nebius": ("https://api.studio.nebius.ai/v1", "meta-llama/Llama-3.3-70B-Instruct"),
+    "nebius": ("https://api.studio.nebius.ai/v1", "deepseek-ai/DeepSeek-V3-0324"),
     "kimi": ("https://api.moonshot.cn/v1", "kimi-k2.5"),
     "deepinfra": ("https://api.deepinfra.com/v1/openai", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
 }
