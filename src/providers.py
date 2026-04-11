@@ -49,6 +49,11 @@ _kimi_keys: list[str] = []
 _kimi_key_index = 0
 _kimi_key_lock = threading.Lock()
 
+# Nebius key fallback chain
+_nebius_keys: list[str] = []
+_nebius_key_index = 0
+_nebius_key_lock = threading.Lock()
+
 
 def _init_kimi_keys() -> list[str]:
     """Build round-robin key pool from KIMI_RESEARCH_KEY_01..20 + primary key."""
@@ -79,6 +84,41 @@ def _get_next_kimi_key() -> str:
     with _kimi_key_lock:
         key = keys[_kimi_key_index % len(keys)]
         _kimi_key_index += 1
+    return key
+
+
+def _init_nebius_keys() -> list[str]:
+    """Build Nebius key fallback chain from NEBIUS_API_KEY + NEBIUS_API_KEY_BACKUP."""
+    global _nebius_keys
+    if _nebius_keys:
+        return _nebius_keys
+    keys: list[str] = []
+    primary = os.environ.get("NEBIUS_API_KEY", "")
+    if primary:
+        keys.append(primary)
+    backup = os.environ.get("NEBIUS_API_KEY_BACKUP", "")
+    if backup:
+        keys.append(backup)
+    # Also check numbered keys NEBIUS_KEY_01..05
+    for i in range(1, 6):
+        k = os.environ.get(f"NEBIUS_KEY_{i:02d}", "")
+        if k and k not in keys:
+            keys.append(k)
+    _nebius_keys = keys
+    if len(keys) > 1:
+        logger.info(f"Nebius key pool: {len(keys)} keys (auto-fallback on quota exhaustion)")
+    return keys
+
+
+def _get_next_nebius_key() -> str:
+    """Return the next Nebius API key, rotating on each call for fallback."""
+    global _nebius_key_index
+    keys = _init_nebius_keys()
+    if not keys:
+        return os.environ.get("NEBIUS_API_KEY", "")
+    with _nebius_key_lock:
+        key = keys[_nebius_key_index % len(keys)]
+        _nebius_key_index += 1
     return key
 
 
@@ -395,9 +435,11 @@ def _call_openai_compatible(
     model = os.environ.get(model_var, default_model)
     max_tokens = int(os.environ.get("MAX_TOKENS", "6000"))
 
-    # Round-robin key for Kimi, plain env var for others
+    # Round-robin / fallback key rotation
     if provider == "kimi":
         api_key = _get_next_kimi_key()
+    elif provider == "nebius":
+        api_key = _get_next_nebius_key()
     else:
         api_key = os.environ.get(api_key_var, "")
 
@@ -441,9 +483,11 @@ def _call_openai_compatible(
             retry_count += 1
             logger.warning(f"OpenAI API error (budget={_budget_var.get()}): {e}")
             if retry_count <= max_retries and _remaining_llm_budget() > 0:
-                # Rotate key on retry for Kimi round-robin
+                # Rotate key on retry for round-robin / fallback
                 if provider == "kimi":
                     client.api_key = _get_next_kimi_key()
+                elif provider == "nebius":
+                    client.api_key = _get_next_nebius_key()
                 time.sleep(_retry_delay(retry_count, provider))
                 continue
             break
