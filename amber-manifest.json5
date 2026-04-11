@@ -38,7 +38,7 @@
       MAX_TOKENS: "6000",
       MAX_API_RETRIES: "1",
       LLM_MAX_CONCURRENCY: "2",
-      NUM_ROLLOUTS: "1",
+      NUM_ROLLOUTS: "3",
       VOTE_TEMPERATURE: "0.4",
       CODE_TIMEOUT: "30",
     },

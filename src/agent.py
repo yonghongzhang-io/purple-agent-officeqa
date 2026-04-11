@@ -25,7 +25,7 @@ from postprocess import (
     _extract_final_answer_text,
     _vote_answers,
 )
-from retrieval import _load_source_context, build_officeqa_strategy
+from retrieval import _build_question_profile, _load_source_context, build_officeqa_strategy
 
 
 logger = logging.getLogger(__name__)
@@ -124,13 +124,14 @@ SYSTEM_PROMPT_OFFICEQA = """You answer U.S. Treasury Bulletin questions using ON
 RULES:
 1. Find the exact number in the reference data. Do NOT guess.
 2. FULL NUMERICAL PRECISION — never round unless asked.
-3. NEVER say "not found", "unable to determine", "I need to verify", or "no data". If uncertain, give your best estimate from the data.
-4. NEVER hedge or give multiple answers. ONE answer only.
-5. Keep FINAL_ANSWER under 500 characters.
-6. If the answer is numeric, prefer a bare number with no prose. Use symbols like % only when the question clearly asks for a percentage.
-7. If the answer is a date or short text label, return only that date or label.
-8. Read pipe-delimited tables carefully: match the column header to the row label to find the exact cell value.
-9. Output ONLY the final answer tags — do NOT continue reasoning after <FINAL_ANSWER>.
+3. FIRST identify the exact table title, row, column, period basis (calendar vs fiscal), and unit before choosing an answer.
+4. For questions about monthly values, totals, means, percent changes, or other calculations, extract the full ordered series first, then compute the final value.
+5. NEVER hedge or give multiple answers. ONE answer only.
+6. Keep FINAL_ANSWER under 500 characters.
+7. If the answer is numeric, prefer a bare number with no prose. Use symbols like % only when the question clearly asks for a percentage.
+8. If the answer is a date or short text label, return only that date or label.
+9. Read pipe-delimited tables carefully: match the column header to the row label to find the exact cell value.
+10. Output ONLY the final answer tags — do NOT continue reasoning after <FINAL_ANSWER>.
 
 OUTPUT FORMAT — you MUST use this exact format:
 <REASONING>
@@ -149,6 +150,13 @@ WRONG (will score 0):
 <FINAL_ANSWER>The total was approximately 2602 million</FINAL_ANSWER>
 <FINAL_ANSWER>Based on my analysis, 2602</FINAL_ANSWER>
 <FINAL_ANSWER>Not found in the provided reference data</FINAL_ANSWER>"""
+
+
+OFFICEQA_ROLLOUT_PERSPECTIVES = [
+    "",
+    "Double-check calendar year versus fiscal year before choosing a table. Prefer the later bulletin only when it revises the same data point.",
+    "For monthly-series or aggregate questions, extract the full ordered series first and compute from those values instead of trusting a generic summary row.",
+]
 
 SYSTEM_PROMPT_GENERAL = """You are an expert AI agent competing in the AgentX-AgentBeats Sprint 1 competition.
 You handle diverse tasks with precision and accuracy.
@@ -507,6 +515,40 @@ def _call_openai_compatible(
 # ---------------------------------------------------------------------------
 # Core LLM response logic
 # ---------------------------------------------------------------------------
+def _officeqa_rollout_count(prompt: str, task_type: str) -> int:
+    """Use extra rollouts only where OfficeQA questions benefit from them."""
+    ceiling = max(1, int(os.environ.get("NUM_ROLLOUTS", "1")))
+    if task_type != "officeqa" or ceiling == 1:
+        return ceiling
+
+    profile = _build_question_profile(prompt)
+    if (
+        profile.get("expects_regression")
+        or profile.get("expects_list")
+        or profile.get("expects_series_math")
+    ):
+        return min(ceiling, 3)
+    if (
+        profile.get("expects_sum")
+        or profile.get("expects_percent")
+        or profile.get("expects_difference")
+        or profile.get("wants_monthly_series")
+        or profile.get("prefers_country_claims")
+    ):
+        return min(ceiling, 2 if ceiling < 3 else 3)
+    return 1
+
+
+def _officeqa_rollout_prompt(base_prompt: str, rollout_idx: int, task_type: str) -> str:
+    """Add a lightweight perspective so repeated Kimi rollouts do non-identical work."""
+    if task_type != "officeqa":
+        return base_prompt
+    perspective = OFFICEQA_ROLLOUT_PERSPECTIVES[min(rollout_idx, len(OFFICEQA_ROLLOUT_PERSPECTIVES) - 1)]
+    if not perspective:
+        return base_prompt
+    return base_prompt + "\n\nROLLOUT FOCUS:\n" + perspective
+
+
 def get_llm_response(prompt: str, context_id: str = "") -> str:
     logger.info(f"ENV CHECK — LLM_PROVIDER={os.environ.get('LLM_PROVIDER')}")
 
@@ -561,135 +603,23 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
             f"QUESTION:\n{prompt}"
         )
 
-    # ------------------------------------------------------------------
-    # DIFFICULTY-BASED MODEL ROUTING
-    # Easy questions → Kimi only (fast, cheap)
-    # Hard questions → Kimi extracts + DeepSeek V3 answers (accurate math)
-    # ------------------------------------------------------------------
-    def _estimate_difficulty(q: str) -> str:
-        q_lower = q.lower()
-        hard_signals = 0
-        # Multi-step calculation signals
-        if any(kw in q_lower for kw in [
-            "percent change", "percentage change", "absolute change",
-            "rate of change", "growth rate", "ratio",
-        ]):
-            hard_signals += 2
-        # Aggregation signals
-        if any(kw in q_lower for kw in [
-            "sum of", "total sum", "all individual months",
-            "aggregate", "combined total", "net change",
-        ]):
-            hard_signals += 2
-        # Multi-year comparison
-        import re as _re
-        years = _re.findall(r'\b(?:19[3-9]\d|20[0-2]\d)\b', q_lower)
-        if len(set(years)) >= 2:
-            hard_signals += 1
-        # Complex phrasing
-        if any(kw in q_lower for kw in [
-            "rounded to", "nearest", "reported as",
-            "using specifically only", "corresponding",
-        ]):
-            hard_signals += 1
-        if len(q) > 300:
-            hard_signals += 1
-        return "hard" if hard_signals >= 2 else "easy"
-
-    question_difficulty = _estimate_difficulty(prompt)
-    smart_routing = os.environ.get("SMART_ROUTING", "true").lower() == "true"
-    cross_check_provider_env = os.environ.get("CROSS_CHECK_PROVIDER", "").lower()
-
-    if smart_routing and question_difficulty == "hard" and cross_check_provider_env:
-        # Hard question: use the cross-check model as PRIMARY for Pass 2
-        # (DeepSeek V3 is better at math than Kimi K2.5)
-        logger.info(f"SMART ROUTING: difficulty={question_difficulty} → primary={cross_check_provider_env} for answer, kimi for extraction")
-    else:
-        logger.info(f"SMART ROUTING: difficulty={question_difficulty} → primary={provider}")
-
-    # ------------------------------------------------------------------
-    # TWO-PASS STRATEGY: Read → Extract → Answer
-    # Pass 1: LLM reads the full source and extracts the exact table/rows needed
-    # Pass 2: LLM answers precisely from the extracted snippet
-    # This mimics how a human expert would solve it: skim the full doc first,
-    # then focus on the relevant section.
-    # ------------------------------------------------------------------
-    two_pass = os.environ.get("TWO_PASS", "true").lower() == "true"
-
-    if two_pass and source_context and len(source_context) > 5000:
-        extract_prompt = (
-            "You are a Treasury Bulletin data extraction expert.\n\n"
-            "REFERENCE DATA:\n\n"
-            f"{source_context}\n\n"
-            "---\n\n"
-            f"QUESTION: {prompt}\n\n"
-            "---\n\n"
-            "TASK: Extract ONLY the specific table rows, column headers, and numeric values "
-            "needed to answer this question. Include the table title, units (millions/billions), "
-            "and any footnotes. Do NOT answer the question yet — just extract the relevant data.\n\n"
-            "Format your extraction as:\n"
-            "TABLE TITLE: ...\n"
-            "UNITS: ...\n"
-            "RELEVANT ROWS:\n"
-            "- [row label]: [value]\n"
-            "- [row label]: [value]\n"
-            "KEY VALUES FOR CALCULATION: ..."
-        )
-        try:
-            extraction = providers._call_openai_compatible(
-                provider, [{"role": "user", "content": extract_prompt}],
-                False, context_id, "You extract precise data from Treasury Bulletins.",
-                0, tools_openai=None, execute_tool=None,
-            )
-            logger.info(f"Pass 1 extraction: {len(extraction)} chars")
-            # Pass 2: answer from the focused extraction
-            augmented_prompt = (
-                "EXTRACTED DATA (from U.S. Treasury Bulletin — verified extraction):\n\n"
-                f"{extraction}\n\n"
-                "---\n\n"
-                "ORIGINAL REFERENCE DATA (for cross-checking):\n\n"
-                f"{source_context[:15000]}\n\n"
-                "---\n\n"
-                "QUESTION-SHAPE SOLVER INSTRUCTIONS:\n"
-                f"{strategy_hint}\n\n"
-                "---\n\n"
-                f"QUESTION:\n{prompt}\n\n"
-                "IMPORTANT: Use the EXTRACTED DATA above as your primary source. "
-                "Cross-check against the ORIGINAL REFERENCE DATA. "
-                "Show your calculation step by step."
-            )
-        except Exception as e:
-            logger.warning(f"Two-pass extraction failed, falling back to single pass: {e}")
-
-    messages = [{"role": "user", "content": augmented_prompt}]
-
     enable_tools = os.environ.get("ENABLE_TOOLS", "false").lower() == "true"
     officeqa_use_tools = os.environ.get("OFFICEQA_USE_TOOLS", "false").lower() == "true"
     if task_type == "officeqa":
         enable_tools = enable_tools and officeqa_use_tools
 
-    num_rollouts = max(1, int(os.environ.get("NUM_ROLLOUTS", "1")))
+    num_rollouts = _officeqa_rollout_count(prompt, task_type)
     vote_temperature = float(os.environ.get("VOTE_TEMPERATURE", "0.2"))
-
-    # ------------------------------------------------------------------
-    # MULTI-MODEL CROSS-CHECK: run primary model + backup model, vote
-    # If CROSS_CHECK_PROVIDER is set, run a second model and pick the
-    # answer that both agree on, or fall back to primary.
-    # ------------------------------------------------------------------
-    cross_check_provider = os.environ.get("CROSS_CHECK_PROVIDER", "").lower()
 
     raw_responses: list[str] = []
     voted_answers: list[str] = []
 
-    # For hard questions with smart routing, use cross-check provider as primary
-    effective_provider = provider
-    if smart_routing and question_difficulty == "hard" and cross_check_provider and cross_check_provider in providers.PROVIDER_DEFAULTS:
-        effective_provider = cross_check_provider
-
     for idx in range(num_rollouts):
         providers._reset_llm_budget()
         rollout_temperature = 0 if idx == 0 else vote_temperature
-        if effective_provider == "anthropic":
+        rollout_prompt = _officeqa_rollout_prompt(augmented_prompt, idx, task_type)
+        messages = [{"role": "user", "content": rollout_prompt}]
+        if provider == "anthropic":
             response = _call_anthropic(
                 messages,
                 enable_tools,
@@ -697,9 +627,9 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
                 system_prompt,
                 rollout_temperature,
             )
-        elif effective_provider in providers.PROVIDER_DEFAULTS:
+        elif provider in providers.PROVIDER_DEFAULTS:
             response = _call_openai_compatible(
-                effective_provider,
+                provider,
                 messages,
                 enable_tools,
                 context_id,
@@ -724,35 +654,7 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         raw_responses.append(cleaned)
         voted_answers.append(_extract_final_answer_text(cleaned))
 
-    # ------------------------------------------------------------------
-    # Cross-check with backup model (if configured)
-    # ------------------------------------------------------------------
-    # For smart routing: if primary was switched to cross_check model for hard questions,
-    # use the ORIGINAL provider (kimi) as the cross-checker instead
-    actual_cross_provider = provider if effective_provider != provider else cross_check_provider
-
-    if actual_cross_provider and actual_cross_provider in providers.PROVIDER_DEFAULTS:
-        try:
-            providers._reset_llm_budget()
-            logger.info(f"Cross-checking with backup model: {actual_cross_provider}")
-            cross_response = providers._call_openai_compatible(
-                actual_cross_provider, messages, enable_tools, context_id + "_cross",
-                system_prompt, 0, tools_openai=TOOLS_OPENAI if enable_tools else None,
-                execute_tool=execute_tool if enable_tools else None,
-            )
-            cross_cleaned = _clean_response(
-                cross_response, original_prompt=prompt, provider=cross_check_provider,
-                task_type=task_type, verify_with_llm=providers._verify_with_llm,
-                should_run_numeric_audit=providers._should_run_numeric_audit,
-            )
-            cross_answer = _extract_final_answer_text(cross_cleaned)
-            voted_answers.append(cross_answer)
-            raw_responses.append(cross_cleaned)
-            logger.info(f"Cross-check answer: {cross_answer[:80]}")
-        except Exception as e:
-            logger.warning(f"Cross-check with {cross_check_provider} failed: {e}")
-
-    if len(voted_answers) == 1:
+    if num_rollouts == 1:
         return raw_responses[0]
 
     voted = _vote_answers(voted_answers)

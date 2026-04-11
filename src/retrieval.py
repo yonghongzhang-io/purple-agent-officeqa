@@ -26,9 +26,12 @@ _STOPWORDS = {
     "are", "did", "does", "do", "with", "at", "as", "that", "this", "these",
     "those", "using", "based", "according", "reported", "specifically", "only",
     "calendar", "monthly", "individual", "values", "between", "fiscal", "year",
-    "treasury", "bulletin", "table", "amount", "value", "number", "nominal",
-    "dollars", "millions", "billions", "trillions", "report", "question",
-    "given", "reporting", "date", "provided",
+    "years", "month", "months", "treasury", "bulletin", "table", "amount",
+    "value", "number", "nominal", "dollars", "millions", "billions",
+    "trillions", "report", "question", "given", "reporting", "date",
+    "provided", "all", "associated", "activities", "activity", "corresponding",
+    "rounded", "nearest", "hundredths", "place", "just", "each", "inclusive",
+    "including", "not",
 }
 
 _DOMAIN_PHRASE_EXPANSIONS = {
@@ -210,6 +213,8 @@ _TABLE_FAMILY_MATCHERS: dict[str, dict[str, list[str]]] = {
         "keywords": [
             "analysis of national defense expenditures",
             "expenditures for national defense and related activities",
+            "cash income and outgo of the treasury, by major classifications",
+            "budget expenditures classified as general, by major functions",
             "calendar yr",
             "calendar year",
             "individual calendar months",
@@ -310,6 +315,8 @@ def _extract_focus_phrases(question: str) -> list[str]:
     """Extract compact finance phrases that identify the target table family."""
     patterns = [
         r"\bnational defense expenditures\b",
+        r"\bnational defense and related activities\b",
+        r"\bnational defense\b",
         r"\bveterans administration\b",
         r"\bpublic works\b",
         r"\bgross federal debt\b",
@@ -493,7 +500,9 @@ def _detect_table_families(question: str, profile: dict[str, object] | None = No
         add("maturity_schedule")
     if re.search(r"\b(veterans administration|national defense|public works|expenditures?)\b", q_lower):
         add("agency_expense")
-    if profile.get("wants_calendar_year") and re.search(r"\bnational defense\b", q_lower):
+    if (profile.get("wants_calendar_year") or profile.get("wants_monthly_series")) and re.search(
+        r"\bnational defense\b", q_lower
+    ):
         add("calendar_defense")
     if re.search(r"\b(expenditures?|departments and agencies|general expenditures)\b", q_lower):
         add("general_expenditures")
@@ -754,9 +763,6 @@ def _question_keywords(question: str) -> list[str]:
 def _extract_years(question: str) -> list[str]:
     """Extract all explicit years from the question."""
     years = set(re.findall(r"\b(19[2-9]\d|20[0-2]\d)\b", question))
-    # Also match FY-prefixed years: FY2023, FY 2023, FY2022-2024
-    for fy_match in re.finditer(r"(?:FY|fy|Fiscal\s*Year)\s*(\d{4})", question):
-        years.add(fy_match.group(1))
     range_patterns = [
         r"\bfrom\s+(19[2-9]\d|20[0-2]\d)\s+to\s+(19[2-9]\d|20[0-2]\d)\b",
         r"\bbetween\s+(19[2-9]\d|20[0-2]\d)\s+and\s+(19[2-9]\d|20[0-2]\d)\b",
@@ -890,6 +896,24 @@ def _build_question_profile(question: str) -> dict[str, object]:
         "individual income tax receipts" in q_lower
         and any(phrase in q_lower for phrase in ["ordinary least squares", "linear regression", "slope and intercept"])
     )
+    expects_series_math = any(
+        phrase in q_lower
+        for phrase in [
+            "geometric mean",
+            "arithmetic mean",
+            "weighted average",
+            "weighted mean",
+            "average",
+            "mean",
+            "median",
+            "variance",
+            "standard deviation",
+            "std. dev",
+            "std dev",
+            "correlation",
+            "volatility",
+        ]
+    )
     wants_january_debt_series = (
         "january" in q_lower
         and "debt" in q_lower
@@ -903,8 +927,11 @@ def _build_question_profile(question: str) -> dict[str, object]:
             "monthly values",
             "each year from",
             "comma separated list",
+            "each month",
+            "for each month",
+            "month from",
         ]
-    )
+    ) or (expects_series_math and bool(month_names) and year_count >= 2)
     wants_auction_bid_data = any(
         phrase in q_lower
         for phrase in [
@@ -967,6 +994,7 @@ def _build_question_profile(question: str) -> dict[str, object]:
                 "slope and intercept",
             ]
         ),
+        "expects_series_math": expects_series_math,
         "expects_date": any(
             phrase in q_lower
             for phrase in [
@@ -980,7 +1008,7 @@ def _build_question_profile(question: str) -> dict[str, object]:
                 "which year",
                 "what year",
             ]
-        ),
+        ) or expects_series_math,
         "expects_percent": any(token in q_lower for token in ["percent", "percentage", "%"]),
         "expects_difference": any(
             phrase in q_lower for phrase in ["difference", "gap", "spread", "minus", "absolute change"]
@@ -1004,6 +1032,14 @@ def _build_question_profile(question: str) -> dict[str, object]:
                 "difference",
                 "gap",
                 "regression",
+                "geometric mean",
+                "average",
+                "mean",
+                "weighted average",
+                "median",
+                "correlation",
+                "standard deviation",
+                "variance",
                 "list the",
                 "inside square brackets",
                 "containing",
@@ -1047,6 +1083,14 @@ def build_officeqa_strategy(question: str) -> str:
                 "This is a series/regression task.",
                 "Extract the full ordered series first, then compute the final slope/intercept.",
                 "Do not answer with a single year, label, or intermediate value.",
+            ]
+        )
+    elif profile.get("expects_series_math"):
+        hints.extend(
+            [
+                "This is a series/statistics task.",
+                "Extract the full ordered monthly or yearly series first, then compute the requested mean, average, median, variance, standard deviation, correlation, or other statistic.",
+                "Do not answer with a single year, label, or partial subtotal.",
             ]
         )
     elif profile.get("expects_list"):
@@ -1101,6 +1145,14 @@ def build_officeqa_strategy(question: str) -> str:
         hints.append("Prefer maturity-schedule tables with amount outstanding, description of securities, and investor-holding columns.")
     if profile.get("wants_calendar_year"):
         hints.append("Prefer calendar-year tables or rows over fiscal-year summary tables unless the question explicitly asks for fiscal year.")
+    if profile.get("wants_monthly_series"):
+        hints.append("Prefer month-by-month tables over annual summary rows when the question asks for monthly values or a statistic computed from months.")
+    if re.search(r"\bnational defense\b", question.lower()) and (
+        profile.get("wants_calendar_year") or profile.get("wants_monthly_series")
+    ):
+        hints.append(
+            "For national-defense calendar questions, prefer the month-by-month national-defense table over generic fiscal summary tables. If the bulletin only gives monthly values, compute the requested total or statistic from those monthly values."
+        )
 
     if profile.get("months"):
         hints.append("Month cues are important here; prefer rows and columns that explicitly mention the requested month names.")
@@ -1150,12 +1202,12 @@ def _heading_signal(line: str) -> int:
         return 0
     score = 0
     if re.match(
-        r"^(table|chart|statement|summary|account|securities|receipts|outlays|debt|balance|assets|liabilities|net|gross|holdings|position|exchange stabilization|federal|budget)\b",
+        r"^(table|chart|statement|summary|account|securities|receipts|outlays|cash|income|outgo|debt|balance|assets|liabilities|net|gross|holdings|position|exchange stabilization|federal|budget)\b",
         lower,
     ):
         score += 2
     if re.search(
-        r"\b(total|gross|net|fiscal year|calendar year|outstanding|millions?|billions?|trillions?|public debt|balances?|receipts|outlays|holdings|positions?)\b",
+        r"\b(total|gross|net|fiscal year|calendar year|outstanding|millions?|billions?|trillions?|public debt|balances?|receipts|outlays|cash|income|outgo|expenditures?|major classifications|holdings|positions?)\b",
         lower,
     ):
         score += 1
@@ -1237,6 +1289,7 @@ def _score_section(section: str, keywords: list[str], years: list[str], profile:
     profile = profile or {}
     expects_list = bool(profile.get("expects_list"))
     expects_regression = bool(profile.get("expects_regression"))
+    expects_series_math = bool(profile.get("expects_series_math"))
     expects_date = bool(profile.get("expects_date"))
     expects_percent = bool(profile.get("expects_percent"))
     expects_sum = bool(profile.get("expects_sum"))
@@ -1246,6 +1299,15 @@ def _score_section(section: str, keywords: list[str], years: list[str], profile:
     if expects_regression:
         year_dense_lines = sum(1 for line in lines if len(re.findall(r"\b(?:19|20)\d{2}\b", line)) >= 2)
         score += min(year_dense_lines, 8) * 4
+    if expects_series_math:
+        year_dense_lines = sum(1 for line in lines if len(re.findall(r"\b(?:19|20)\d{2}\b", line)) >= 2)
+        month_dense_lines = sum(
+            1
+            for line in lines
+            if re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z.]*\b", line, re.IGNORECASE)
+        )
+        score += min(year_dense_lines, 6) * 3
+        score += min(month_dense_lines, 8) * 2
     if expects_list:
         repetitive_numeric_lines = sum(1 for line in lines if len(re.findall(r"-?\d[\d,]*\.?\d*", line)) >= 4)
         score += min(repetitive_numeric_lines, 8) * 3
@@ -1356,6 +1418,13 @@ def _score_table_block(
         year_hits = len(re.findall(r"\b(?:19|20)\d{2}\b", text))
         if year_hits >= 6:
             score += 22
+    if profile.get("expects_series_math"):
+        year_hits = len(re.findall(r"\b(?:19|20)\d{2}\b", text))
+        month_hits = len(re.findall(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z.]*\b", text))
+        if year_hits >= 4:
+            score += 18
+        if month_hits >= 6:
+            score += 18
     if profile.get("expects_list"):
         numeric_hits = len(re.findall(r"-?\d[\d,]*\.?\d*", text))
         if numeric_hits >= 8:
@@ -1516,8 +1585,18 @@ def _score_table_block(
     if "calendar_defense" in families:
         if re.search(r"\b(analysis of national defense expenditures|expenditures for national defense and related activities)\b", family_text):
             score += 54
+        if re.search(
+            r"\b(cash income and outgo of the treasury, by major classifications|budget expenditures classified as general, by major functions)\b",
+            family_text,
+        ):
+            score += 40
         if re.search(r"\b(summary table on budget receipts and expenditures|budget receipts and expenditures|summary of fiscal statistics)\b", family_text):
             score -= 30
+    if ("calendar_defense" in families or "national_defense" in families) and profile.get("wants_monthly_series"):
+        if re.search(r"\bsummary of budget results by months and years\b", family_text):
+            score -= 28
+        if re.search(r"\bbusiness-type activities\b", family_text):
+            score -= 70
     if "general_expenditures" in families:
         if re.search(r"\b(analysis of general expenditures|departments and agencies)\b", family_text):
             score += 26
@@ -2014,10 +2093,37 @@ def _needs_global_file_search(profile: dict[str, object], families: list[str]) -
         profile.get("mentions_veterans_admin")
         or profile.get("prefers_country_claims")
         or profile.get("expects_regression")
+        or profile.get("expects_series_math")
         or profile.get("expects_list")
         or profile.get("note_term_years")
+        or (profile.get("wants_monthly_series") and profile.get("year_count", 0) >= 3)
         or ("auction" in families and profile.get("expects_date"))
     )
+
+
+def _source_context_limits(question: str) -> tuple[int, int]:
+    """Choose retrieval breadth based on the question's structure."""
+    base_files = int(os.environ.get("MAX_SOURCE_FILES", "2"))
+    base_chars = int(os.environ.get("SOURCE_MAX_CHARS", "12000"))
+    profile = _build_question_profile(question)
+    families = _detect_table_families(question, profile)
+
+    max_files = base_files
+    max_chars = base_chars
+
+    if profile.get("expects_regression") or profile.get("expects_list") or profile.get("expects_series_math"):
+        max_files = max(max_files, 4)
+        max_chars = max(max_chars, 22000)
+    if profile.get("wants_monthly_series") or profile.get("expects_sum") or profile.get("expects_percent"):
+        max_files = max(max_files, 3)
+        max_chars = max(max_chars, 18000)
+    if profile.get("prefers_country_claims") or profile.get("year_count", 0) >= 5:
+        max_files = max(max_files, 4)
+    if "calendar_defense" in families:
+        max_files = max(max_files, 3)
+        max_chars = max(max_chars, 18000)
+
+    return max_files, max_chars
 
 
 def _seed_anchor_files(
@@ -2091,7 +2197,7 @@ def _seed_anchor_files(
     return anchors
 
 
-def _find_source_files(question: str) -> list[str]:
+def _find_source_files(question: str, max_files: int | None = None) -> list[str]:
     """Find relevant Treasury source files by extracting dates from the question."""
     available = _list_source_files()
     if not available:
@@ -2099,7 +2205,8 @@ def _find_source_files(question: str) -> list[str]:
 
     lower = question.lower()
     profile = _build_question_profile(question)
-    max_files = int(os.environ.get("MAX_SOURCE_FILES", "2"))
+    if max_files is None:
+        max_files, _ = _source_context_limits(question)
     matched = []
     pinned = []
     direct_refs = _detect_bulletin_reference(question, available)
@@ -2152,7 +2259,7 @@ def _find_source_files(question: str) -> list[str]:
     if years_found and min(int(year) for year in years_found) < 1950:
         followup_years = max(followup_years, 10)
 
-    for match in re.finditer(r"(?:fiscal\s+year|FY)\s*(\d{4})", lower, re.IGNORECASE):
+    for match in re.finditer(r"fiscal\s+year\s+(\d{4})", lower):
         fy = match.group(1)
         years_found.add(fy)
         prev_year = str(int(fy) - 1)
@@ -2169,7 +2276,11 @@ def _find_source_files(question: str) -> list[str]:
         for year in sorted(years_found):
             start_year = int(year)
             end_year = min(start_year + followup_years + 1, 2026)
-            if profile.get("expects_regression") or profile.get("expects_list"):
+            if (
+                profile.get("expects_regression")
+                or profile.get("expects_list")
+                or profile.get("expects_series_math")
+            ):
                 end_year = min(start_year + max(followup_years, 10) + 1, 2026)
             for bullet_year in range(start_year, end_year):
                 for month in ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]:
@@ -2205,25 +2316,10 @@ def _find_source_files(question: str) -> list[str]:
     if matched:
         matched = _select_best_source_files(matched, question, max_files, pinned=pinned)
     else:
-        # BM25-style keyword fallback: score ALL files by keyword overlap when
-        # date filtering produced no candidates. This catches questions about
-        # topics not tied to a specific date (e.g., "What table shows X?").
-        _bm25_kw = _question_keywords(question)
-        _bm25_years = _extract_years(question)
-        _bm25_dim = _extract_dimension_terms(question, profile)
-        bm25_ranked = sorted(
-            available,
-            key=lambda fname: (
-                -_score_source_file_cheap(
-                    fname, question, _bm25_kw, _bm25_years, profile, families, _bm25_dim
-                ),
-                fname,
-            ),
-        )[:max(20, max_files * 5)]
-        matched = _select_best_source_files(bm25_ranked, question, max_files, pinned=pinned)
+        matched = _select_best_source_files(available, question, max_files, pinned=pinned)
         if matched:
             logger.info(
-                f"BM25 keyword fallback selected {len(matched)} files for undated question"
+                f"Lexical source fallback selected {len(matched)} files for undated question"
             )
 
     if direct_refs:
@@ -2296,7 +2392,7 @@ def _extract_windowed_table_snippets(section: str, question: str, budget_chars: 
     keywords = _question_keywords(question)
     years = _extract_years(question)
     window_radius = 10
-    if profile.get("expects_list") or profile.get("expects_regression"):
+    if profile.get("expects_list") or profile.get("expects_regression") or profile.get("expects_series_math"):
         window_radius = 18
     elif profile.get("expects_sum"):
         window_radius = 14
@@ -2342,7 +2438,7 @@ def _extract_windowed_table_snippets(section: str, question: str, budget_chars: 
     return "\n\n".join(parts).strip()
 
 
-def _narrow_table_rows(table_text: str, question: str, max_rows: int = 40) -> str:
+def _narrow_table_rows(table_text: str, question: str, max_rows: int = 20) -> str:
     """Narrow a pipe-delimited table to the header + rows most relevant to the question.
 
     Keeps the first row (header) and up to *max_rows* rows that mention years,
@@ -2388,7 +2484,7 @@ def _narrow_table_rows(table_text: str, question: str, max_rows: int = 40) -> st
         row_score = 0
         line_lower = stripped.lower()
         for year in years:
-            if re.search(r'\b' + re.escape(year) + r'\b', stripped):
+            if year in stripped:
                 row_score += 10
         for month in months_in_q:
             if month in line_lower:
@@ -2516,11 +2612,18 @@ def _extract_relevant_snippets(filename: str, content: str, question: str, budge
     return "\n\n".join(selected).strip()
 
 
-def _load_source_context(question: str, max_chars: int | None = None) -> str:
+def _load_source_context(
+    question: str,
+    max_chars: int | None = None,
+    max_files: int | None = None,
+) -> str:
     """Load relevant Treasury Bulletin source text for a question."""
+    default_files, default_chars = _source_context_limits(question)
     if max_chars is None:
-        max_chars = int(os.environ.get("SOURCE_MAX_CHARS", "12000"))
-    source_files = _find_source_files(question)
+        max_chars = default_chars
+    if max_files is None:
+        max_files = default_files
+    source_files = _find_source_files(question, max_files=max_files)
     if not source_files:
         return ""
 
