@@ -651,32 +651,10 @@ def _salvage_officeqa_answer(question: str, answer: str, response: str) -> str:
         if percent and (_is_placeholder_answer(answer) or _is_suspicious_officeqa_answer(question, answer)):
             return percent
 
-    if _is_placeholder_answer(answer):
-        # Answer is clearly bad (placeholder) — aggressive salvage is safe
+    if _is_placeholder_answer(answer) or _looks_like_list_answer(answer) or _is_suspicious_officeqa_answer(question, answer):
         candidate = _select_scalar_candidate(question, combined)
         if candidate:
-            logger.info(f"Salvage: placeholder '{answer[:50]}' → '{candidate}'")
             return candidate
-    elif _is_suspicious_officeqa_answer(question, answer):
-        # Answer exists but looks wrong — only replace if we have high confidence
-        candidate = _select_scalar_candidate(question, combined)
-        if candidate:
-            # Don't override if the existing answer has a valid number and the
-            # candidate is from a different magnitude (could be a different row)
-            existing_val, _ = _parse_scalar_token(answer.strip())
-            candidate_val, _ = _parse_scalar_token(candidate.strip())
-            if existing_val is not None and candidate_val is not None:
-                # Only salvage if existing is clearly wrong (e.g., year vs dollar)
-                ratio = abs(candidate_val / existing_val) if existing_val != 0 else Decimal("999")
-                if Decimal("0.01") < ratio < Decimal("100"):
-                    # Same order of magnitude — keep original, it may have context
-                    logger.debug(f"Salvage skipped: existing={answer[:50]} candidate={candidate} (similar magnitude)")
-                else:
-                    logger.info(f"Salvage: suspicious '{answer[:50]}' → '{candidate}' (magnitude mismatch)")
-                    return candidate
-            else:
-                logger.info(f"Salvage: suspicious '{answer[:50]}' → '{candidate}'")
-                return candidate
 
     if _question_unit(question):
         return _convert_unit_for_question(question, answer)
@@ -696,24 +674,16 @@ def _clean_response(
     verify_with_llm: Callable[[str, str, str], str] | None = None,
     should_run_numeric_audit: Callable[[str, str], bool] | None = None,
 ) -> str:
-    # Robust <think> tag removal — handles DeepSeek-R1's various formats:
-    # 1. Properly closed: <think>...</think>
-    # 2. Unclosed: <think>... (no closing tag)
-    # 3. Nested or malformed tags
-    # Strategy: remove all closed pairs first, then strip any remaining unclosed <think> blocks
     response = re.sub(r"<think>.*?</think>\s*", "", response, flags=re.DOTALL)
-    if "<think>" in response:
-        # Unclosed <think> — keep only content BEFORE it, unless FINAL_ANSWER follows
-        think_idx = response.index("<think>")
-        after_think = response[think_idx:]
-        # Check if there's a FINAL_ANSWER or REASONING tag after the unclosed <think>
-        answer_match = re.search(r"<(?:FINAL_ANSWER|REASONING)>", after_think, re.IGNORECASE)
-        if answer_match:
-            # Keep content before <think> + content from the answer tag onward
-            response = response[:think_idx].strip() + "\n" + after_think[answer_match.start():]
+    while "<think>" in response:
+        idx = response.index("<think>")
+        after = response[idx:]
+        close = re.search(r"</(?:FINAL_ANSWER|REASONING)>", after, re.IGNORECASE)
+        if close:
+            response = response[:idx] + after[close.start():]
         else:
-            # No answer tag after <think> — just remove everything from <think> onward
-            response = response[:think_idx].strip()
+            response = response[:idx].strip()
+        break
 
     if "<FINAL_ANSWER>" not in response and "<final_answer>" not in response.lower():
         lines = [line.strip() for line in response.strip().split("\n") if line.strip()]
@@ -746,7 +716,8 @@ def _clean_response(
         answer = _extract_best_compact_line(answer)
         answer = _normalize_final_text(answer)
         if task_type == "officeqa":
-            answer = _salvage_officeqa_answer(original_prompt, answer, response)
+            if _is_placeholder_answer(answer) or not answer.strip():
+                answer = _salvage_officeqa_answer(original_prompt, answer, response)
             answer = _normalize_final_text(answer)
 
         if original_prompt and task_type != "officeqa":
