@@ -791,6 +791,16 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     hard_model = os.environ.get("HYBRID_HARD_MODEL", "Qwen/Qwen3.5-397B-A17B-fast")
     cross_provider = os.environ.get("HYBRID_CROSSCHECK_PROVIDER", "kimi").lower()
     cross_model = os.environ.get("HYBRID_CROSSCHECK_MODEL", os.environ.get("KIMI_MODEL", "kimi-k2.5"))
+
+    # Loud diagnostic so we can verify hybrid routing is actually enabled at runtime
+    if task_type == "officeqa" and hybrid_enabled and difficulty in {"medium", "hard"}:
+        if not providers._provider_is_available(hard_provider):
+            logger.warning(
+                "[ROUTING] Q-difficulty=%s wants %s but provider unavailable "
+                "(check %s_API_KEY env var). Falling back to %s.",
+                difficulty, hard_provider, hard_provider.upper(), provider,
+            )
+
     route_to_nebius = (
         hybrid_enabled
         and difficulty in {"medium", "hard"}

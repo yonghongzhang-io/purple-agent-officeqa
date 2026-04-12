@@ -447,7 +447,8 @@ def _call_openai_compatible(
     is_k2 = provider == "kimi" and "k2" in model.lower()
 
     # Kimi K2.5 supports tool calls via OpenAI-compatible API
-    supports_tools = (provider in ("openai", "kimi")) and enable_tools
+    # Nebius Qwen3.5+/DeepSeek-V3+ models support OpenAI-compatible tool calls
+    supports_tools = (provider in ("openai", "kimi", "nebius")) and enable_tools
     openai_tools = tools_openai if supports_tools else []
 
     base_messages = [{"role": "system", "content": system_prompt}] + messages
