@@ -11,6 +11,34 @@ from starlette.responses import HTMLResponse
 
 load_dotenv()
 
+
+def _startup_env_diagnostic():
+    """Print which env vars are set at startup so we can verify hybrid routing
+    actually has the secrets it needs. Does NOT print secret values."""
+    import sys
+    diag_vars = [
+        "LLM_PROVIDER", "KIMI_MODEL", "NEBIUS_MODEL",
+        "KIMI_API_KEY", "NEBIUS_API_KEY", "NEBIUS_API_KEY_BACKUP",
+        "HYBRID_ROUTING", "HYBRID_HARD_PROVIDER", "HYBRID_HARD_MODEL",
+        "HYBRID_CROSSCHECK_PROVIDER", "HYBRID_CROSSCHECK_MODEL",
+        "ENABLE_TOOLS", "OFFICEQA_USE_TOOLS", "NEBIUS_ENABLE_TOOLS",
+        "KIMI_THINKING", "MAX_SOURCE_FILES", "SOURCE_MAX_CHARS",
+        "MAX_LLM_CALLS", "MAX_TOKENS", "NUM_ROLLOUTS",
+    ]
+    print("=" * 60, file=sys.stderr, flush=True)
+    print("[STARTUP] Purple Agent env diagnostic:", file=sys.stderr, flush=True)
+    for var in diag_vars:
+        val = os.environ.get(var, "")
+        if "KEY" in var:
+            shown = f"SET ({len(val)} chars)" if val else "MISSING"
+        else:
+            shown = val if val else "(unset)"
+        print(f"  {var:30s} = {shown}", file=sys.stderr, flush=True)
+    print("=" * 60, file=sys.stderr, flush=True)
+
+
+_startup_env_diagnostic()
+
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
