@@ -443,12 +443,19 @@ def _call_openai_compatible(
     max_tokens = int(os.environ.get("MAX_TOKENS", "6000"))
 
     api_key = _get_provider_api_key(provider, api_key_var)
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    api_timeout = float(os.environ.get("API_TIMEOUT_SECONDS", "120"))
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=api_timeout)
     is_k2 = provider == "kimi" and "k2" in model.lower()
 
     # Kimi K2.5 supports tool calls via OpenAI-compatible API
-    # Nebius Qwen3.5+/DeepSeek-V3+ models support OpenAI-compatible tool calls
-    supports_tools = (provider in ("openai", "kimi", "nebius")) and enable_tools
+    # OpenAI + Kimi support tools by default. Nebius supports them but
+    # only behind an explicit flag (NEBIUS_ENABLE_TOOLS=true) since
+    # Qwen3.5's tool-call format had reliability issues in early testing.
+    nebius_tools_enabled = os.environ.get("NEBIUS_ENABLE_TOOLS", "false").lower() == "true"
+    supports_tools = enable_tools and (
+        provider in ("openai", "kimi")
+        or (provider == "nebius" and nebius_tools_enabled)
+    )
     openai_tools = tools_openai if supports_tools else []
 
     base_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -479,27 +486,33 @@ def _call_openai_compatible(
             kwargs["tools"] = openai_tools
             kwargs["tool_choice"] = "auto"
 
+        logger.info(f"[{provider.upper()}] call start model={model} budget={_budget_var.get()}/{int(os.environ.get('MAX_LLM_CALLS','4'))}")
         try:
             with _get_api_semaphore():
                 response = client.chat.completions.create(**kwargs)
         except Exception as e:
             last_error = e
             retry_count += 1
-            logger.warning(f"OpenAI API error (budget={_budget_var.get()}): {e}")
+            logger.warning(f"[{provider.upper()}] FAIL model={model} budget={_budget_var.get()} retry={retry_count}/{max_retries}: {e}")
             if retry_count <= max_retries and _remaining_llm_budget() > 0:
-                # Rotate key on retry for Kimi round-robin
+                # Rotate key on retry
                 if provider in {"kimi", "nebius"}:
                     client.api_key = _get_provider_api_key(provider, api_key_var)
                 time.sleep(_retry_delay(retry_count, provider))
                 continue
             break
+        logger.info(f"[{provider.upper()}] call ok model={model}")
         retry_count = 0
         if not _consume_llm_call():
             break
         choice = response.choices[0]
 
-        if choice.finish_reason == "tool_calls" and supports_tools:
-            tool_calls = choice.message.tool_calls or []
+        # Detect tool calls from message.tool_calls (not finish_reason).
+        # Nebius Qwen3.5 returns finish_reason="length" with tool_calls populated,
+        # which the old `finish_reason == "tool_calls"` check missed entirely.
+        message_tool_calls = getattr(choice.message, "tool_calls", None) or []
+        if supports_tools and message_tool_calls:
+            tool_calls = message_tool_calls
             # For Kimi K2.5 tool-call follow-ups, disable thinking to save tokens
             if is_k2:
                 _thinking_disabled_for_tools = True
@@ -508,13 +521,23 @@ def _call_openai_compatible(
             current_messages = current_messages + [choice.message]
             tool_results_msgs = []
             for tool_call in tool_calls:
-                args = json.loads(tool_call.function.arguments)
-                result = execute_tool(tool_call.function.name, args)
-                logger.info(f"Tool {tool_call.function.name}({args}) -> {result[:200]}")
+                # Defensive arg parsing — some providers return strings, others objects
+                raw_args = tool_call.function.arguments
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except (json.JSONDecodeError, TypeError) as parse_err:
+                    logger.warning(f"Tool arg parse failed for {tool_call.function.name}: {parse_err}")
+                    args = {}
+                try:
+                    result = execute_tool(tool_call.function.name, args)
+                except Exception as exec_err:
+                    logger.warning(f"Tool {tool_call.function.name} exec failed: {exec_err}")
+                    result = f"Tool execution error: {exec_err}"
+                logger.info(f"[{provider}] Tool {tool_call.function.name}({args}) -> {str(result)[:200]}")
                 tool_results_msgs.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result,
+                    "content": str(result),
                 })
             current_messages = current_messages + tool_results_msgs
             # Rotate key before follow-up call

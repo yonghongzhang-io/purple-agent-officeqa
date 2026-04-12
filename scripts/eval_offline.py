@@ -77,7 +77,7 @@ def answers_match(predicted: str, expected: str) -> bool:
 
 
 def run_eval(args):
-    from agent import process_task
+    from agent import get_llm_response
     from retrieval import _load_source_context
 
     csv_path = args.csv
@@ -116,7 +116,7 @@ def run_eval(args):
         t0 = time.time()
 
         try:
-            response = process_task(question, task_type="officeqa")
+            response = get_llm_response(question, context_id=uid)
             # Extract FINAL_ANSWER
             match = re.search(r"<FINAL_ANSWER>(.*?)</FINAL_ANSWER>", response, re.DOTALL | re.IGNORECASE)
             predicted = match.group(1).strip() if match else response.strip().split("\n")[-1]
