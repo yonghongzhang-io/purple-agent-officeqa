@@ -33,7 +33,7 @@ except ImportError:
 PROVIDER_DEFAULTS = {
     "openai": (None, "gpt-4o"),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
-    "nebius": ("https://api.studio.nebius.ai/v1", "meta-llama/Llama-3.3-70B-Instruct"),
+    "nebius": ("https://api.studio.nebius.ai/v1", "Qwen/Qwen3.5-397B-A17B-fast"),
     "kimi": ("https://api.moonshot.cn/v1", "kimi-k2.5"),
     "deepinfra": ("https://api.deepinfra.com/v1/openai", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
 }
@@ -48,6 +48,9 @@ _semaphore_cache: dict[int, threading.BoundedSemaphore] = {}
 _kimi_keys: list[str] = []
 _kimi_key_index = 0
 _kimi_key_lock = threading.Lock()
+_nebius_keys: list[str] = []
+_nebius_key_index = 0
+_nebius_key_lock = threading.Lock()
 
 
 def _init_kimi_keys() -> list[str]:
@@ -80,6 +83,47 @@ def _get_next_kimi_key() -> str:
         key = keys[_kimi_key_index % len(keys)]
         _kimi_key_index += 1
     return key
+
+
+def _init_nebius_keys() -> list[str]:
+    """Build round-robin key pool from Nebius primary/backup keys."""
+    global _nebius_keys
+    if _nebius_keys:
+        return _nebius_keys
+    keys: list[str] = []
+    for env_name in ("NEBIUS_API_KEY", "NEBIUS_API_KEY_BACKUP"):
+        key = os.environ.get(env_name, "")
+        if key and key not in keys:
+            keys.append(key)
+    for i in range(1, 20):
+        key = os.environ.get(f"NEBIUS_API_KEY_{i:02d}", "")
+        if key and key not in keys:
+            keys.append(key)
+    _nebius_keys = keys
+    if len(keys) > 1:
+        logger.info("Nebius round-robin initialized with %d API keys", len(keys))
+    return keys
+
+
+def _get_next_nebius_key() -> str:
+    """Return the next Nebius API key in round-robin order."""
+    global _nebius_key_index
+    keys = _init_nebius_keys()
+    if not keys:
+        return os.environ.get("NEBIUS_API_KEY", "")
+    with _nebius_key_lock:
+        key = keys[_nebius_key_index % len(keys)]
+        _nebius_key_index += 1
+    return key
+
+
+def _get_provider_api_key(provider: str, env_var: str) -> str:
+    """Resolve an API key, using provider-specific round-robin pools when configured."""
+    if provider == "kimi":
+        return _get_next_kimi_key()
+    if provider == "nebius":
+        return _get_next_nebius_key()
+    return os.environ.get(env_var, "")
 
 
 def _reset_llm_budget() -> None:
@@ -139,6 +183,8 @@ def _provider_is_available(provider: str) -> bool:
     # Kimi: also check round-robin keys
     if provider == "kimi":
         return bool(os.environ.get(env_var)) or bool(_init_kimi_keys())
+    if provider == "nebius":
+        return bool(os.environ.get(env_var)) or bool(_init_nebius_keys())
     return bool(os.environ.get(env_var))
 
 
@@ -188,7 +234,7 @@ def _classify_with_llm(prompt: str, provider: str, valid_labels: list[str] | tup
                 "deepinfra": ("DEEPINFRA_API_KEY", "ROUTER_MODEL", "DEEPINFRA_MODEL"),
             }
             api_key_var, router_var, model_var = key_map[provider]
-            api_key = _get_next_kimi_key() if provider == "kimi" else os.environ.get(api_key_var, "")
+            api_key = _get_provider_api_key(provider, api_key_var)
             client = OpenAI(api_key=api_key, base_url=base_url)
             model = os.environ.get(router_var, os.environ.get(model_var, default_model))
             is_k2 = provider == "kimi" and "k2" in model.lower()
@@ -264,7 +310,7 @@ def _verify_with_llm(question: str, answer: str, provider: str) -> str:
                 "deepinfra": ("DEEPINFRA_API_KEY", "VERIFIER_MODEL", "DEEPINFRA_MODEL"),
             }
             api_key_var, verifier_var, model_var = key_map[provider]
-            api_key = _get_next_kimi_key() if provider == "kimi" else os.environ.get(api_key_var, "")
+            api_key = _get_provider_api_key(provider, api_key_var)
             client = OpenAI(api_key=api_key, base_url=base_url)
             model = os.environ.get(verifier_var, os.environ.get(model_var, default_model))
             is_k2 = provider == "kimi" and "k2" in model.lower()
@@ -379,6 +425,7 @@ def _call_openai_compatible(
     system_prompt: str,
     temperature: float = 0,
     *,
+    model_override: str | None = None,
     tools_openai: list[dict],
     execute_tool,
 ) -> str:
@@ -392,15 +439,10 @@ def _call_openai_compatible(
         "deepinfra": ("DEEPINFRA_API_KEY", "DEEPINFRA_MODEL"),
     }
     api_key_var, model_var = key_map[provider]
-    model = os.environ.get(model_var, default_model)
+    model = model_override or os.environ.get(model_var, default_model)
     max_tokens = int(os.environ.get("MAX_TOKENS", "6000"))
 
-    # Round-robin key for Kimi, plain env var for others
-    if provider == "kimi":
-        api_key = _get_next_kimi_key()
-    else:
-        api_key = os.environ.get(api_key_var, "")
-
+    api_key = _get_provider_api_key(provider, api_key_var)
     client = OpenAI(api_key=api_key, base_url=base_url)
     is_k2 = provider == "kimi" and "k2" in model.lower()
 
@@ -445,8 +487,8 @@ def _call_openai_compatible(
             logger.warning(f"OpenAI API error (budget={_budget_var.get()}): {e}")
             if retry_count <= max_retries and _remaining_llm_budget() > 0:
                 # Rotate key on retry for Kimi round-robin
-                if provider == "kimi":
-                    client.api_key = _get_next_kimi_key()
+                if provider in {"kimi", "nebius"}:
+                    client.api_key = _get_provider_api_key(provider, api_key_var)
                 time.sleep(_retry_delay(retry_count, provider))
                 continue
             break
@@ -475,8 +517,8 @@ def _call_openai_compatible(
                 })
             current_messages = current_messages + tool_results_msgs
             # Rotate key before follow-up call
-            if provider == "kimi":
-                client.api_key = _get_next_kimi_key()
+            if provider in {"kimi", "nebius"}:
+                client.api_key = _get_provider_api_key(provider, api_key_var)
         else:
             final_text = choice.message.content or ""
             # Kimi K2.5 thinking mode: reasoning goes to reasoning_content

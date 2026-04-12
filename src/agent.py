@@ -499,6 +499,8 @@ def _call_openai_compatible(
     context_id: str,
     system_prompt: str,
     temperature: float = 0,
+    *,
+    model_override: str | None = None,
 ) -> str:
     return providers._call_openai_compatible(
         provider,
@@ -507,6 +509,7 @@ def _call_openai_compatible(
         context_id,
         system_prompt,
         temperature,
+        model_override=model_override,
         tools_openai=TOOLS_OPENAI,
         execute_tool=execute_tool,
     )
@@ -549,6 +552,179 @@ def _officeqa_rollout_prompt(base_prompt: str, rollout_idx: int, task_type: str)
     return base_prompt + "\n\nROLLOUT FOCUS:\n" + perspective
 
 
+def _extract_question_uid(prompt: str) -> str:
+    match = re.search(r"\bUID\d{4}\b", prompt, re.IGNORECASE)
+    return match.group(0).upper() if match else "unknown"
+
+
+def _answer_is_error_like(answer: str) -> bool:
+    lower = answer.strip().lower()
+    return lower in {
+        "",
+        "no answer found",
+        "unable to determine",
+        "unable to determine from available data",
+    } or "error:" in lower
+
+
+def _normalize_answer_for_compare(answer: str) -> str:
+    cleaned = answer.strip().strip("`").strip("\"' ").lower()
+    cleaned = cleaned.replace(",", "")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _answer_supported_by_context(answer: str, source_context: str) -> bool:
+    if not answer or not source_context:
+        return False
+    norm_answer = _normalize_answer_for_compare(answer)
+    if not norm_answer or len(norm_answer) > 120:
+        return False
+    return norm_answer in _normalize_answer_for_compare(source_context)
+
+
+def _officeqa_difficulty(prompt: str) -> tuple[str, dict[str, object]]:
+    """Classify OfficeQA questions into easy/medium/hard for routing."""
+    profile = _build_question_profile(prompt)
+    score = 0
+    q_lower = prompt.lower()
+    year_count = int(profile.get("year_count", 0) or 0)
+
+    if profile.get("expects_regression"):
+        score += 6
+    if profile.get("expects_list"):
+        score += 5
+    if profile.get("expects_series_math"):
+        score += 5
+    if profile.get("wants_monthly_series"):
+        score += 5
+    if profile.get("prefers_country_claims"):
+        score += 4
+    if profile.get("expects_sum"):
+        score += 3
+    if profile.get("expects_percent"):
+        score += 3
+    if profile.get("expects_difference"):
+        score += 3
+    if year_count >= 3:
+        score += 2
+    if year_count >= 5:
+        score += 1
+    if len(prompt) >= 280:
+        score += 2
+    elif len(prompt) >= 200:
+        score += 1
+    if any(
+        phrase in q_lower
+        for phrase in [
+            "rounded to the nearest",
+            "specifically only",
+            "inclusive",
+            "monthly values",
+            "taking only the monthly values",
+            "for each month",
+            "each month from",
+            "geometric mean",
+            "ordinary least squares",
+        ]
+    ):
+        score += 1
+
+    if score >= 6:
+        return "hard", profile
+    if score >= 3:
+        return "medium", profile
+    return "easy", profile
+
+
+def _run_model_once(
+    provider: str,
+    model: str,
+    prompt: str,
+    system_prompt: str,
+    enable_tools: bool,
+    context_id: str,
+    task_type: str,
+    original_prompt: str,
+    temperature: float = 0,
+) -> tuple[str, str]:
+    """Run one model call and return (cleaned_response, final_answer_text)."""
+    providers._reset_llm_budget()
+    messages = [{"role": "user", "content": prompt}]
+    if provider == "anthropic":
+        response = _call_anthropic(
+            messages,
+            enable_tools,
+            context_id,
+            system_prompt,
+            temperature,
+        )
+    else:
+        response = _call_openai_compatible(
+            provider,
+            messages,
+            enable_tools,
+            context_id,
+            system_prompt,
+            temperature,
+            model_override=model,
+        )
+    cleaned = _clean_response(
+        response,
+        original_prompt=original_prompt,
+        provider=provider,
+        task_type=task_type,
+        verify_with_llm=providers._verify_with_llm,
+        should_run_numeric_audit=providers._should_run_numeric_audit,
+    )
+    return cleaned, _extract_final_answer_text(cleaned)
+
+
+def _provider_model_label(provider: str) -> str:
+    if provider == "kimi":
+        return f"{provider}:{os.environ.get('KIMI_MODEL', 'kimi-k2.5')}"
+    if provider == "nebius":
+        return f"{provider}:{os.environ.get('NEBIUS_MODEL', providers.PROVIDER_DEFAULTS['nebius'][1])}"
+    return provider
+
+
+def _choose_hybrid_winner(
+    question: str,
+    source_context: str,
+    profile: dict[str, object],
+    primary_answer: str,
+    cross_answer: str,
+) -> str:
+    """Choose between Nebius primary and Kimi cross-check answers."""
+    if _answer_is_error_like(primary_answer) and not _answer_is_error_like(cross_answer):
+        return "cross_check"
+    if _answer_is_error_like(cross_answer):
+        return "primary"
+
+    if _normalize_answer_for_compare(primary_answer) == _normalize_answer_for_compare(cross_answer):
+        return "agree"
+
+    primary_in_context = _answer_supported_by_context(primary_answer, source_context)
+    cross_in_context = _answer_supported_by_context(cross_answer, source_context)
+    if primary_in_context and not cross_in_context:
+        return "primary"
+    if cross_in_context and not primary_in_context:
+        return "cross_check"
+
+    if (
+        profile.get("expects_regression")
+        or profile.get("expects_list")
+        or profile.get("expects_series_math")
+        or profile.get("wants_monthly_series")
+        or profile.get("expects_sum")
+        or profile.get("expects_percent")
+        or profile.get("expects_difference")
+        or profile.get("prefers_country_claims")
+    ):
+        return "primary"
+    return "cross_check"
+
+
 def get_llm_response(prompt: str, context_id: str = "") -> str:
     logger.info(f"ENV CHECK — LLM_PROVIDER={os.environ.get('LLM_PROVIDER')}")
 
@@ -570,6 +746,8 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
 
     # Current competition mode: OfficeQA-only submission agent.
     task_type = "officeqa"
+    question_uid = _extract_question_uid(prompt)
+    difficulty, difficulty_profile = _officeqa_difficulty(prompt)
 
     source_context = _load_source_context(prompt)
     if source_context:
@@ -607,6 +785,90 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
     officeqa_use_tools = os.environ.get("OFFICEQA_USE_TOOLS", "false").lower() == "true"
     if task_type == "officeqa":
         enable_tools = enable_tools and officeqa_use_tools
+
+    hybrid_enabled = os.environ.get("HYBRID_ROUTING", "true").lower() == "true"
+    hard_provider = os.environ.get("HYBRID_HARD_PROVIDER", "nebius").lower()
+    hard_model = os.environ.get("HYBRID_HARD_MODEL", "Qwen/Qwen3.5-397B-A17B-fast")
+    cross_provider = os.environ.get("HYBRID_CROSSCHECK_PROVIDER", "kimi").lower()
+    cross_model = os.environ.get("HYBRID_CROSSCHECK_MODEL", os.environ.get("KIMI_MODEL", "kimi-k2.5"))
+    route_to_nebius = (
+        hybrid_enabled
+        and difficulty in {"medium", "hard"}
+        and hard_provider in providers.PROVIDER_DEFAULTS
+        and providers._provider_is_available(hard_provider)
+    )
+    should_cross_check = difficulty == "hard" and providers._provider_is_available(cross_provider)
+
+    if route_to_nebius:
+        primary_label = f"{hard_provider}:{hard_model}"
+        cross_label = f"{cross_provider}:{cross_model}"
+        primary_prompt = _officeqa_rollout_prompt(augmented_prompt, 0, task_type)
+        _, primary_answer = _run_model_once(
+            hard_provider,
+            hard_model,
+            primary_prompt,
+            system_prompt,
+            enable_tools,
+            context_id,
+            task_type,
+            prompt,
+        )
+        cross_answer = ""
+        winner = "primary"
+        if should_cross_check:
+            cross_prompt = _officeqa_rollout_prompt(augmented_prompt, 1, task_type)
+            _, cross_answer = _run_model_once(
+                cross_provider,
+                cross_model,
+                cross_prompt,
+                system_prompt,
+                enable_tools,
+                context_id,
+                task_type,
+                prompt,
+            )
+            winner = _choose_hybrid_winner(
+                prompt,
+                source_context,
+                difficulty_profile,
+                primary_answer,
+                cross_answer,
+            )
+
+        final_answer = primary_answer
+        winning_label = primary_label
+        if winner == "cross_check" and cross_answer:
+            final_answer = cross_answer
+            winning_label = cross_label
+        elif winner == "agree":
+            final_answer = primary_answer
+            winning_label = f"agree:{primary_label}"
+
+        logger.info(
+            "[ROUTING] Q=%s difficulty=%s primary=%s cross_check=%s winner=%s",
+            question_uid,
+            difficulty,
+            primary_label,
+            cross_label if should_cross_check else "none",
+            winning_label,
+        )
+        hybrid_response = (
+            "<REASONING>\n"
+            "Selected the final answer using medium-plus hybrid routing.\n"
+            "</REASONING>\n"
+            "<FINAL_ANSWER>\n"
+            f"{final_answer}\n"
+            "</FINAL_ANSWER>"
+        )
+        winner_provider = hard_provider if winner != "cross_check" else cross_provider
+        return _clean_response(
+            hybrid_response,
+            original_prompt=prompt,
+            provider=winner_provider,
+            task_type=task_type,
+            verify_with_llm=providers._verify_with_llm,
+            should_run_numeric_audit=providers._should_run_numeric_audit,
+        )
 
     num_rollouts = _officeqa_rollout_count(prompt, task_type)
     vote_temperature = float(os.environ.get("VOTE_TEMPERATURE", "0.2"))
@@ -655,6 +917,13 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         voted_answers.append(_extract_final_answer_text(cleaned))
 
     if num_rollouts == 1:
+        logger.info(
+            "[ROUTING] Q=%s difficulty=%s primary=%s cross_check=none winner=%s",
+            question_uid,
+            difficulty,
+            _provider_model_label(provider),
+            _provider_model_label(provider),
+        )
         return raw_responses[0]
 
     voted = _vote_answers(voted_answers)
@@ -665,6 +934,13 @@ def get_llm_response(prompt: str, context_id: str = "") -> str:
         "<FINAL_ANSWER>\n"
         f"{voted}\n"
         "</FINAL_ANSWER>"
+    )
+    logger.info(
+        "[ROUTING] Q=%s difficulty=%s primary=%s cross_check=rollout-vote winner=%s",
+        question_uid,
+        difficulty,
+        _provider_model_label(provider),
+        _provider_model_label(provider),
     )
     return _clean_response(
         ensemble_response,
