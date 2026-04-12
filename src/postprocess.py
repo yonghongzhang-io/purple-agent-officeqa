@@ -261,11 +261,45 @@ def _extract_best_compact_line(answer: str) -> str:
     return answer
 
 
+_PROMPT_ECHO_PHRASES = (
+    "if the answer is numeric",
+    "output only",
+    "output format",
+    "final_answer",
+    "you must use",
+    "you may not",
+    "rules:",
+    "<reasoning>",
+    "</reasoning>",
+    "<final_answer>",
+    "</final_answer>",
+)
+
+
+def _is_prompt_echo(text: str) -> bool:
+    """Detect when the LLM echoed system prompt text instead of answering."""
+    lower = text.lower()
+    return any(phrase in lower for phrase in _PROMPT_ECHO_PHRASES)
+
+
+def _is_pipe_table_row(text: str) -> bool:
+    """Reject final answers that look like raw pipe-delimited table rows."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # 2+ pipes typically means a multi-column row, not a single value
+    return stripped.count("|") >= 2
+
+
 def _normalize_final_text(answer: str) -> str:
     cleaned = answer.strip().strip("`").strip()
     cleaned = cleaned.strip("\"' ")
     if cleaned.endswith(".") and len(cleaned.split()) <= 6:
         cleaned = cleaned[:-1].rstrip()
+
+    # Reject obvious garbage: prompt echoes, pipe-delimited rows
+    if _is_prompt_echo(cleaned) or _is_pipe_table_row(cleaned):
+        return ""
     return cleaned
 
 
@@ -690,7 +724,11 @@ def _clean_response(
         answer = lines[-1] if lines else response
         response = f"<REASONING>\n{response}\n</REASONING>\n<FINAL_ANSWER>\n{answer}\n</FINAL_ANSWER>"
 
-    match = re.search(r"<FINAL_ANSWER>(.*?)</FINAL_ANSWER>", response, re.DOTALL | re.IGNORECASE)
+    # Use the LAST <FINAL_ANSWER>...</FINAL_ANSWER> block, not the first.
+    # When the LLM echoes the system prompt back as part of its reasoning,
+    # the first match captures the prompt example, not the actual answer.
+    _all_fa_matches = list(re.finditer(r"<FINAL_ANSWER>(.*?)</FINAL_ANSWER>", response, re.DOTALL | re.IGNORECASE))
+    match = _all_fa_matches[-1] if _all_fa_matches else None
     if match:
         answer = match.group(1).strip()
         answer = re.sub(r"<think>.*?</think>\s*", "", answer, flags=re.DOTALL)
@@ -760,9 +798,10 @@ def _clean_response(
 
 
 def _extract_final_answer_text(response: str) -> str:
-    match = re.search(r"<FINAL_ANSWER>(.*?)</FINAL_ANSWER>", response, re.DOTALL | re.IGNORECASE)
-    if match:
-        answer = match.group(1).strip()
+    # Use the LAST FINAL_ANSWER, not the first (avoids prompt-echo capture)
+    matches = list(re.finditer(r"<FINAL_ANSWER>(.*?)</FINAL_ANSWER>", response, re.DOTALL | re.IGNORECASE))
+    if matches:
+        answer = matches[-1].group(1).strip()
         return _extract_compact_final_line(_extract_bare_answer(answer))
     lines = [line.strip() for line in response.splitlines() if line.strip()]
     return lines[-1] if lines else ""
