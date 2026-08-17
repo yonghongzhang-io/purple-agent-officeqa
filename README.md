@@ -1,8 +1,10 @@
-# Purple Agent — AgentX Sprint 1 (OfficeQA)
+# OfficeQA Agent — Document-Grounded Treasury QA
 
-An A2A-protocol agent for the OfficeQA benchmark in the AgentX-AgentBeats Sprint 1 competition. It answers U.S. Treasury Bulletin questions by retrieving bundled Treasury source documents, reasoning over the most relevant table- and section-level context, and returning exact-match-friendly final answers.
+**A retrieval-and-reasoning agent for question answering over U.S. Treasury Bulletin documents.**
 
-This repository is also configured for lightweight cloud deployment targets such as Railway.
+This repository contains the OfficeQA agent developed for the **AgentX / AgentBeats Sprint 1** benchmark. The agent answers Treasury Bulletin questions by retrieving bundled source documents, selecting relevant table- and section-level context, reasoning over the evidence, and returning exact-match-friendly final answers.
+
+The project is also configured for lightweight cloud deployment targets such as Railway.
 
 ## How It Works
 
@@ -81,13 +83,13 @@ curl https://YOUR_DOMAIN.up.railway.app/.well-known/agent-card.json
 │   ├── messenger.py    # Lightweight A2A client helper for remote agent calls
 │   └── server.py       # A2A server, OfficeQA agent card, Railway landing page
 ├── tests/              # Offline and integration tests
-├── treasury_data/    # 697 Treasury Bulletin source documents (bundled in Docker image)
+├── treasury_data/      # 697 Treasury Bulletin source documents (bundled in Docker image)
 ├── Dockerfile
 ├── amber-manifest.json5  # AgentBeats platform manifest
 ├── pyproject.toml
 ├── uv.lock
 ├── sample.env
-└── scenario.toml     # Leaderboard submission config
+└── scenario.toml       # Leaderboard submission config
 ```
 
 ## Configuration
